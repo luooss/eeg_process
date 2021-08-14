@@ -171,8 +171,8 @@ class DANNTrainApp:
         #     self.batch_size *= torch.cuda.device_count()
 
         # the size of source and target in each batch should be equal, otherwise the model tends to focus on source
-        source_dloader = DataLoader(self.dset, batch_size=self.batch_size // 2, num_workers=self.nworkers, pin_memory=self.use_cuda, shuffle=True, sampler=train_sampler)
-        target_dloader = DataLoader(self.dset, batch_size=self.batch_size // 2, num_workers=self.nworkers, pin_memory=self.use_cuda, shuffle=True, sampler=test_sampler)
+        source_dloader = DataLoader(self.dset, batch_size=self.batch_size // 2, num_workers=self.nworkers, pin_memory=self.use_cuda, shuffle=False, sampler=train_sampler)
+        target_dloader = DataLoader(self.dset, batch_size=self.batch_size // 2, num_workers=self.nworkers, pin_memory=self.use_cuda, shuffle=False, sampler=test_sampler)
         
         return source_dloader, target_dloader
 
