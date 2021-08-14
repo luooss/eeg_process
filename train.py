@@ -5,6 +5,7 @@ import random
 from pprint import pprint
 from numpy.lib.function_base import average
 import numpy as np
+from scipy.stats.stats import RepeatedResults
 from torch._C import dtype
 from torch.functional import split
 
@@ -40,7 +41,7 @@ parser.add_argument('--which',
                     type=int)
 parser.add_argument('--maxepochs',
                     help='Maximum training epochs',
-                    default=1000,
+                    default=300,
                     type=int)
 
 # LSTM hyper-parameters
@@ -57,7 +58,8 @@ parser.add_argument('--num_layers',
 args = parser.parse_args()
 
 experiments = ['subj_dependent', 'subj_independent']
-features = ['psd', 'de']
+# features = ['psd', 'de']
+features = ['de']
 freq_bands = ['all', 'delta', 'theta', 'alpha', 'beta', 'gamma']
 subjects = ['chenyi', 'huangwenjing', 'huangxingbao', 'huatong', 'wuwenrui', 'yinhao']
 phases = ['train', 'test']
@@ -99,9 +101,7 @@ class SVMTrainApp:
         for ph in phases:
             result[ph] = {}
             for ind in indicators:
-                result[ph][ind] = {}
-                for nub in ['mean', 'std']:
-                    result[ph][ind][nub] = self.model.cv_results_[nub+'_'+ph+'_'+ind][idx]
+                result[ph][ind] = self.model.cv_results_['mean_'+ph+'_'+ind][idx]
         
         print('The best hyper parameters: {}'.format(self.model.best_params_))
 
@@ -130,9 +130,9 @@ class DANNTrainApp:
         self.device = torch.device('cuda' if self.use_cuda else 'cpu')
     
     def get_runs(self):
-        params = OrderedDict(lr = np.logspace(-5, -1, 5),
-                             lambda_ = np.logspace(-5, 0, 6),
-                             alpha = np.logspace(-5, 0, 6))
+        params = OrderedDict(lr = np.logspace(-4, -2, 3),
+                             lambda_ = np.logspace(-2, 0, 3),
+                             alpha = np.logspace(-2, 0, 3))
         Run = namedtuple('Run', params.keys())
         runs = []
         for v in product(*params.values()):
@@ -175,15 +175,20 @@ class DANNTrainApp:
 
     def main(self):
         runs = self.get_runs()
+        result = {}
+        for run in runs:
+            result[run] = {}
+            for ph in phases:
+                result[run][ph] = {}
+
         for run in runs:
             comment = ' DANN lr={} lambda_={} alpha={}'.format(run.lr, run.lambda_, run.alpha)
             dann_writer = SummaryWriter(comment=comment)
 
             print('Hyper Parameter test: ' + comment)
-            test_accuracies = []
             start_outer = time.time()
 
-            source_dloader, target_dloader, input_dim = self.getDataset()
+            source_dloader, target_dloader = self.getDataset()
             nbatches = min(len(source_dloader), len(target_dloader))
 
             dann, domain_classifier = self.getModel(run.lambda_)
@@ -203,7 +208,6 @@ class DANNTrainApp:
                     src_domain_label = torch.zeros(src_emotion_label.size()[0]).to(torch.long)
                     tgt_domain_label = torch.ones(tgt_emotion_label.size()[0]).to(torch.long)
                     # (256, 62, 1, 5)
-                    # standardization over 62 channels
                     x = torch.cat([src_data, tgt_data], 0).to(self.device)
                     y_emotion = src_emotion_label.to(self.device)
                     y_domain = torch.cat([src_domain_label, tgt_domain_label], 0).to(self.device)
@@ -239,32 +243,44 @@ class DANNTrainApp:
                 dann_writer.flush()
                 dann_writer.close()
 
-                # if epoch == 1 or epoch % 100 == 0:
-                #     tqdm.write('Epoch {:6d}: emotion_pred_accuracy {:10.4f}, domain_pred_accuracy {:10.4f}'.format(epoch, epa_mean, dpa_mean))
+                if epoch == 1 or epoch % 100 == 0:
+                    tqdm.write('Epoch {:6d}: train_emotion_pred_accuracy {:.4f}, train_domain_pred_accuracy {:.4f}'.format(epoch, epa_mean, dpa_mean))
             
-            # validation
-            with torch.no_grad():
-                correct, total = 0, 0
-                for tx, ty_e in target_dloader:
-                    tx = tx.to(self.device, non_blocking=True)
-                    ty_e = ty_e.to(self.device, non_blocking=True)
+            validation_dloaders = [source_dloader, target_dloader]
+            # validation on train set, test set
+            for ph, der in zip(phases, validation_dloaders):
+                with torch.no_grad():
+                    y_true, y_pred = [], []
+                    for tx, ty_e in der:
+                        tx = tx.to(self.device, non_blocking=True)
+                        ty_e = ty_e.to(self.device, non_blocking=True)
 
-                    tpred_e = dann(tx)
-
-                    correct += (tpred_e.max(dim=1)[1] == ty_e).float().sum().item()
-                    total += tx.shape[0]
-                
-                acc = correct / total
-                print('Model transfer prediction accuracy: {:10.4f}'.format(acc))
-                test_accuracies.append(acc)
+                        tpred_e = dann(tx)
+                        y_p = tpred_e.max(dim=1)[1].to(device='cpu').numpy()
+                        y_t = ty_e.to(device='cpu').numpy()
+                        y_true.append(y_t)
+                        y_pred.append(y_p)
+                    
+                    y_true = np.concatenate(y_true, axis=0)
+                    y_pred = np.concatenate(y_pred, axis=0)
+                    acc = accuracy_score(y_true, y_pred)
+                    f1_macro = f1_score(y_true, y_pred, average='macro')
+                    result[run][ph]['accuracy'] = acc
+                    result[run][ph]['f1_macro'] = f1_macro
+                    tqdm.write('For this run, {} set accuracy/f1: {:.4f}/{:.4f}'.format(ph, acc, f1_macro))
         
-        end_outer = time.time()
-        dur_outer = end_outer - start_outer
-        print('Train time: {:4d}min {:2d}sec'.format(int(dur_outer // 60), int(dur_outer % 60)))
+            end_outer = time.time()
+            dur_outer = end_outer - start_outer
+            print('For this run, train time: {:4d}min {:2d}sec'.format(int(dur_outer // 60), int(dur_outer % 60)))
+        
+        best_run = runs[0]
+        for run in runs:
+            if(result[run]['test']['f1_macro'] > result[best_run]['test']['f1_macro']):
+                best_run = run
+        
+        print('Best hyper parameter: lr={} lambda_={} alpha={}'.format(run.lr, run.lambda_, run.alpha))
+        return result[best_run]
 
-        cv_acc_mean = torch.tensor(test_accuracies).mean().item()
-        cv_acc_std = torch.tensor(test_accuracies).std().item()
-        print('Leave-one-out cross validation, mean: {:10.4f}, std: {:10.4f}'.format(cv_acc_mean, cv_acc_std))
 
 
 class LSTMTrainApp:
@@ -417,17 +433,19 @@ if __name__ == '__main__':
                             print('>>> Model: SVM')
                             result = SVMTrainApp(dset, split_strategy).main()
                         elif args.which == 1:
-                            pass
+                            model_name = 'DANN'
+                            print('>>> Model: DANN')
+                            result = DANNTrainApp(dset, split_strategy).main()
                         
                         exp_result[subject] = result
 
                 print('Result:')
                 pprint(exp_result)
 
-                subj_train_accs = np.array([round(exp_result[subj]['train']['accuracy']['mean'], 4) for subj in subjects])
-                subj_train_f1s = np.array([round(exp_result[subj]['train']['f1_macro']['mean'], 4) for subj in subjects])
-                subj_test_accs = np.array([round(exp_result[subj]['test']['accuracy']['mean'], 4) for subj in subjects])
-                subj_test_f1s = np.array([round(exp_result[subj]['test']['f1_macro']['mean'], 4) for subj in subjects])
+                subj_train_accs = np.array([round(exp_result[subj]['train']['accuracy'], 4) for subj in subjects])
+                subj_train_f1s = np.array([round(exp_result[subj]['train']['f1_macro'], 4) for subj in subjects])
+                subj_test_accs = np.array([round(exp_result[subj]['test']['accuracy'], 4) for subj in subjects])
+                subj_test_f1s = np.array([round(exp_result[subj]['test']['f1_macro'], 4) for subj in subjects])
 
                 plt.style.use('seaborn')
                 x = np.arange(0, (len(subjects)-1)*2.5+1, 2.5)  # the label locations
@@ -443,10 +461,8 @@ if __name__ == '__main__':
                 ax.set_xticks(x)
                 ax.set_xticklabels(subjects)
                 ax.set_ylim(0.0, 1.0)
-                # Shrink current axis by 20%
                 box = ax.get_position()
                 ax.set_position([box.x0, box.y0, box.width * 0.8, box.height])
-                # Put a legend to the right of the current axis
                 ax.legend([acc_train_rect, acc_test_rect, f1_test_rect], ['Train', 'Test/Acc.', 'Test/F1.'], loc='center left', bbox_to_anchor=(1, 0.5))
                 ax.bar_label(acc_train_rect, padding=3)
                 ax.bar_label(acc_test_rect, padding=3)

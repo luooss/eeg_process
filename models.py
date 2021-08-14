@@ -28,13 +28,14 @@ class FeatureExtractor(nn.Module):
     def __init__(self):
         super().__init__()
         self.bn = nn.BatchNorm2d(62)
+        self.flat = nn.Flatten()
         self.fc1 = nn.Linear(310, 256)
         self.relu1 = nn.ReLU()
         # self.dropout = nn.Dropout()
         self.fc2 = nn.Linear(256, 128)
 
     def forward(self, x):
-        a = self.bn(x)
+        a = self.flat(self.bn(x))
         a = self.relu1(self.fc1(a))
         a = self.fc2(a)
         return a

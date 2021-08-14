@@ -1,9 +1,19 @@
+import numpy as np
+from collections import OrderedDict, namedtuple
+from itertools import product
 
+params = OrderedDict(lr = np.logspace(1, 2, 2),
+                     lambda_ = np.logspace(1, 2, 2),
+                     alpha = np.logspace(1, 2, 2))
+Run = namedtuple('Run', params.keys())
+runs = []
+for v in product(*params.values()):
+    runs.append(Run(*v))
 
-b = a + 2
-c = v - 1
-print(b, c)
+result = {}
+for i in range(8):
+    result[runs[i]] = i
 
-if __name__ == '__main__':
-    a = 12
-    v = 34
+print(result[runs[2]])
+print(result[runs[5]])
+print(result[runs[1]])
