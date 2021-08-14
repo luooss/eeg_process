@@ -35,9 +35,13 @@ from models import *
 
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--exp',
+                    help='What experiment: subj_dep, subj_indep',
+                    default='subj_dep',
+                    type=str)
 parser.add_argument('--which',
                     help='Which model to train: 0-SVM, 1-DANN, 2-LSTM',
-                    default='0',
+                    default=0,
                     type=int)
 parser.add_argument('--maxepochs',
                     help='Maximum training epochs',
@@ -57,7 +61,6 @@ parser.add_argument('--num_layers',
 
 args = parser.parse_args()
 
-experiments = ['subj_dependent', 'subj_independent']
 # features = ['psd', 'de']
 features = ['de']
 freq_bands = ['all', 'delta', 'theta', 'alpha', 'beta', 'gamma']
@@ -387,91 +390,90 @@ class LSTMTrainApp:
 
 
 if __name__ == '__main__':
-    for exp in experiments:
-        print('#'*50, 'Experiment: ', exp)
-        for feature in features:
-            print('#'*30, 'Feature: ', feature)
-            for freq in freq_bands:
-                print('#'*20, 'Freq. Band: ', freq)
-                model_name = None
-                exp_result = {}
+    print('#'*50, 'Experiment: ', args.exp)
+    for feature in features:
+        print('#'*30, 'Feature: ', feature)
+        for freq in freq_bands:
+            print('#'*20, 'Freq. Band: ', freq)
+            model_name = None
+            exp_result = {}
 
-                if exp == 'subj_dependent':
-                    for subject in subjects:
-                        print('#'*10, 'Train on ', subject)
+            if args.exp == 'subj_dep':
+                for subject in subjects:
+                    print('#'*10, 'Train on ', subject)
 
-                        data_path = data_dir + '/' + subject + '_data_' + feature + '.npy'
-                        label_path = data_dir + '/' + subject + '_label.npy'
-                        dset = ArtDataset([data_path], [label_path], freq_band=freq)
-                        split_strategy = StratifiedShuffleSplit(n_splits=9, test_size=100)
-                        
-                        if args.which == 0:
-                            model_name = 'SVM'
-                            print('>>> Model: SVM')
-                            result = SVMTrainApp(dset, split_strategy).main()
-                        elif args.which == 1:
-                            pass
-                        
-                        exp_result[subject] = result
-                elif exp == 'subj_independent':
-                    data_paths = [data_dir + '/' + subj + '_data_' + feature + '.npy' for subj in subjects]
-                    label_paths = [data_dir + '/' + subj + '_label.npy' for subj in subjects]
-                    # (6*900, ...)
-                    dset = ArtDataset(data_paths, label_paths, freq_band=freq)
+                    data_path = data_dir + '/' + subject + '_data_' + feature + '.npy'
+                    label_path = data_dir + '/' + subject + '_label.npy'
+                    dset = ArtDataset([data_path], [label_path], freq_band=freq)
+                    split_strategy = StratifiedShuffleSplit(n_splits=9, test_size=100)
+                    
+                    if args.which == 0:
+                        model_name = 'SVM'
+                        print('>>> Model: SVM')
+                        result = SVMTrainApp(dset, split_strategy).main()
+                    elif args.which == 1:
+                        pass
+                    
+                    exp_result[subject] = result
+            elif args.exp == 'subj_indep':
+                data_paths = [data_dir + '/' + subj + '_data_' + feature + '.npy' for subj in subjects]
+                label_paths = [data_dir + '/' + subj + '_label.npy' for subj in subjects]
+                # (6*900, ...)
+                dset = ArtDataset(data_paths, label_paths, freq_band=freq)
 
-                    for subject in subjects:
-                        print('#'*10, 'Target on ', subject)
-                        subj_idx = subjects.index(subject)
+                for subject in subjects:
+                    print('#'*10, 'Target on ', subject)
+                    subj_idx = subjects.index(subject)
 
-                        test_fold = np.empty(5400, dtype=np.int8)
-                        test_fold.fill(-1)
-                        test_fold[subj_idx*900: (subj_idx+1)*900] = 0
-                        split_strategy = PredefinedSplit(test_fold)
-                        
-                        if args.which == 0:
-                            model_name = 'SVM'
-                            print('>>> Model: SVM')
-                            result = SVMTrainApp(dset, split_strategy).main()
-                        elif args.which == 1:
-                            model_name = 'DANN'
-                            print('>>> Model: DANN')
-                            result = DANNTrainApp(dset, split_strategy).main()
-                        
-                        exp_result[subject] = result
+                    test_fold = np.empty(5400, dtype=np.int8)
+                    test_fold.fill(-1)
+                    test_fold[subj_idx*900: (subj_idx+1)*900] = 0
+                    split_strategy = PredefinedSplit(test_fold)
+                    
+                    if args.which == 0:
+                        model_name = 'SVM'
+                        print('>>> Model: SVM')
+                        result = SVMTrainApp(dset, split_strategy).main()
+                    elif args.which == 1:
+                        model_name = 'DANN'
+                        print('>>> Model: DANN')
+                        result = DANNTrainApp(dset, split_strategy).main()
+                    
+                    exp_result[subject] = result
 
-                print('Result:')
-                pprint(exp_result)
+            print('Result:')
+            pprint(exp_result)
 
-                subj_train_accs = np.array([round(exp_result[subj]['train']['accuracy'], 4) for subj in subjects])
-                subj_train_f1s = np.array([round(exp_result[subj]['train']['f1_macro'], 4) for subj in subjects])
-                subj_test_accs = np.array([round(exp_result[subj]['test']['accuracy'], 4) for subj in subjects])
-                subj_test_f1s = np.array([round(exp_result[subj]['test']['f1_macro'], 4) for subj in subjects])
+            subj_train_accs = np.array([round(exp_result[subj]['train']['accuracy'], 4) for subj in subjects])
+            subj_train_f1s = np.array([round(exp_result[subj]['train']['f1_macro'], 4) for subj in subjects])
+            subj_test_accs = np.array([round(exp_result[subj]['test']['accuracy'], 4) for subj in subjects])
+            subj_test_f1s = np.array([round(exp_result[subj]['test']['f1_macro'], 4) for subj in subjects])
 
-                plt.style.use('seaborn')
-                x = np.arange(0, (len(subjects)-1)*2.5+1, 2.5)  # the label locations
-                width = 1.0  # the width of the bars
-                fig, ax = plt.subplots(figsize=(14.8, 7.8))
-                acc_train_rect = ax.bar(x - width/2, subj_train_accs, width, label='Train/Acc', fill=False, ls='--')
-                acc_test_rect = ax.bar(x - width/2, subj_test_accs, width, label='Test/Acc')
-                f1_train_rect = ax.bar(x + width/2, subj_train_f1s, width, label='Train/F1', fill=False, ls='--')
-                f1_test_rect = ax.bar(x + width/2, subj_test_f1s, width, label='Test/F1')
-                # Add some text for labels, title and custom x-axis tick labels, etc.
-                ax.set_xlabel('Subjects')
-                ax.set_title('{}_{}_{}_{}'.format(exp, feature, freq, model_name), pad=36)
-                ax.set_xticks(x)
-                ax.set_xticklabels(subjects)
-                ax.set_ylim(0.0, 1.0)
-                box = ax.get_position()
-                ax.set_position([box.x0, box.y0, box.width * 0.8, box.height])
-                ax.legend([acc_train_rect, acc_test_rect, f1_test_rect], ['Train', 'Test/Acc.', 'Test/F1.'], loc='center left', bbox_to_anchor=(1, 0.5))
-                ax.bar_label(acc_train_rect, padding=3)
-                ax.bar_label(acc_test_rect, padding=3)
-                ax.bar_label(f1_train_rect, padding=3)
-                ax.bar_label(f1_test_rect, padding=3)
-                fig.savefig('./figs/{}_{}_{}_{}.png'.format(exp, feature, freq, model_name))
-                plt.close('all')
+            plt.style.use('seaborn')
+            x = np.arange(0, (len(subjects)-1)*2.5+1, 2.5)  # the label locations
+            width = 1.0  # the width of the bars
+            fig, ax = plt.subplots(figsize=(14.8, 7.8))
+            acc_train_rect = ax.bar(x - width/2, subj_train_accs, width, label='Train/Acc', fill=False, ls='--')
+            acc_test_rect = ax.bar(x - width/2, subj_test_accs, width, label='Test/Acc')
+            f1_train_rect = ax.bar(x + width/2, subj_train_f1s, width, label='Train/F1', fill=False, ls='--')
+            f1_test_rect = ax.bar(x + width/2, subj_test_f1s, width, label='Test/F1')
+            # Add some text for labels, title and custom x-axis tick labels, etc.
+            ax.set_xlabel('Subjects')
+            ax.set_title('{}_{}_{}_{}'.format(args.exp, feature, freq, model_name), pad=36)
+            ax.set_xticks(x)
+            ax.set_xticklabels(subjects)
+            ax.set_ylim(0.0, 1.0)
+            box = ax.get_position()
+            ax.set_position([box.x0, box.y0, box.width * 0.8, box.height])
+            ax.legend([acc_train_rect, acc_test_rect, f1_test_rect], ['Train', 'Test/Acc.', 'Test/F1.'], loc='center left', bbox_to_anchor=(1, 0.5))
+            ax.bar_label(acc_train_rect, padding=3)
+            ax.bar_label(acc_test_rect, padding=3)
+            ax.bar_label(f1_train_rect, padding=3)
+            ax.bar_label(f1_test_rect, padding=3)
+            fig.savefig('./figs/{}_{}_{}_{}.png'.format(args.exp, feature, freq, model_name))
+            plt.close('all')
 
-                print('====Train:\nacc: {:.4f}/{:.4f}\nf1: {:.4f}/{:.4f}'.format(subj_train_accs.mean(), subj_train_accs.std(), subj_train_f1s.mean(), subj_train_f1s.std()))
-                print('====Test:\nacc: {:.4f}/{:.4f}\nf1: {:.4f}/{:.4f}'.format(subj_test_accs.mean(), subj_test_accs.std(), subj_test_f1s.mean(), subj_test_f1s.std()))
+            print('====Train:\nacc: {:.4f}/{:.4f}\nf1: {:.4f}/{:.4f}'.format(subj_train_accs.mean(), subj_train_accs.std(), subj_train_f1s.mean(), subj_train_f1s.std()))
+            print('====Test:\nacc: {:.4f}/{:.4f}\nf1: {:.4f}/{:.4f}'.format(subj_test_accs.mean(), subj_test_accs.std(), subj_test_f1s.mean(), subj_test_f1s.std()))
 
 
