@@ -57,6 +57,9 @@ class EmotionClassifier(nn.Module):
         a = self.lsm(self.fc2(a))
         return a
 
+class MyDataParallel(nn.DataParallel):
+    def __getattr__(self, name):
+        return getattr(self.module, name)
 
 class DANN(nn.Module):
     def __init__(self):

@@ -48,6 +48,21 @@ parser.add_argument('--maxepochs',
                     default=300,
                     type=int)
 
+parser.add_argument('--lr',
+                    help='Learning rate',
+                    default='np.logspace(-2, -1, 2)',
+                    type=str)
+
+# DANN hyper params
+parser.add_argument('--lambda_',
+                    help='Coefficient of inverse gradient',
+                    default='np.logspace(-1, 0, 2)',
+                    type=str)
+parser.add_argument('--alpha',
+                    help='Coefficient of domain prediction loss',
+                    default='np.logspace(-7, -4, 4)',
+                    type=str)
+
 # LSTM hyper-parameters
 parser.add_argument('--hidden_size',
                     help='Hidden size of the LSTM, enter multiple values like [32,64,128] starts hyperparameter test',
@@ -64,6 +79,7 @@ args = parser.parse_args()
 # features = ['psd', 'de']
 features = ['de']
 freq_bands = ['all', 'delta', 'theta', 'alpha', 'beta', 'gamma']
+# freq_bands = ['alpha', 'beta', 'gamma']
 subjects = ['chenyi', 'huangwenjing', 'huangxingbao', 'huatong', 'wuwenrui', 'yinhao']
 phases = ['train', 'test']
 indicators = ['accuracy', 'f1_macro']
@@ -82,8 +98,7 @@ class SVMTrainApp:
         self.label = dset.label.numpy()
         self.split_strategy = split_strategy
 
-        hyperparams = [{'kernel': ['linear'], 'C': np.logspace(-2, 10, 13)},
-                       {'kernel': ['rbf'], 'C': np.logspace(-2, 10, 13), 'gamma': np.logspace(-9, 3, 13)}]
+        hyperparams = [{'kernel': ['rbf'], 'C': [0.01, 1, 100, 10000, 1000000], 'gamma': np.logspace(-6, -2, 5)}]
         # refit: after hp is determined, learn the best lp over the whole dataset, this is for prediction
         self.model = GridSearchCV(SVC(),
                                   param_grid=hyperparams,
@@ -125,7 +140,8 @@ class DANNTrainApp:
     def __init__(self, dset, split_strategy):
         self.dset = dset
         self.split_strategy = split_strategy
-        self.nworkers = os.cpu_count()
+        # self.nworkers = os.cpu_count()
+        self.nworkers = 0
         self.maxepochs = args.maxepochs
         self.batch_size = 256
 
@@ -133,9 +149,9 @@ class DANNTrainApp:
         self.device = torch.device('cuda' if self.use_cuda else 'cpu')
     
     def get_runs(self):
-        params = OrderedDict(lr = np.logspace(-4, -2, 3),
-                             lambda_ = np.logspace(-2, 0, 3),
-                             alpha = np.logspace(-2, 0, 3))
+        params = OrderedDict(lr = eval(args.lr),
+                             lambda_ = eval(args.lambda_),
+                             alpha = eval(args.alpha))
         Run = namedtuple('Run', params.keys())
         runs = []
         for v in product(*params.values()):
@@ -148,9 +164,9 @@ class DANNTrainApp:
         domain_clf = DomainClassifier(lambda_)
         if self.use_cuda:
             print('Using cuda. Total {:d} devices.'.format(torch.cuda.device_count()))
-            # if torch.cuda.device_count() > 1:
-            #     dann = nn.DataParallel(dann)
-            #     domain_clf = nn.DataParallel(domain_clf)
+            if torch.cuda.device_count() > 1:
+                dann = nn.DataParallel(dann)
+                domain_clf = nn.DataParallel(domain_clf)
         else:
             print('Using cpu.')
 
@@ -196,8 +212,8 @@ class DANNTrainApp:
 
             dann, domain_classifier = self.getModel(run.lambda_)
             # weight initialization
-            dann.feature_extractor.apply(self.init_weights)
-            dann.emotion_classifier.apply(self.init_weights)
+            dann.module.feature_extractor.apply(self.init_weights)
+            dann.module.emotion_classifier.apply(self.init_weights)
             domain_classifier.apply(self.init_weights)
 
             # optim = torch.optim.Adam(list(dann.parameters()) + list(domain_classifier.parameters()))
@@ -215,8 +231,8 @@ class DANNTrainApp:
                     y_emotion = src_emotion_label.to(self.device)
                     y_domain = torch.cat([src_domain_label, tgt_domain_label], 0).to(self.device)
 
-                    features = dann.feature_extractor(x)
-                    pred_emotion = dann.emotion_classifier(features[:src_data.size()[0]])
+                    features = dann.module.feature_extractor(x)
+                    pred_emotion = dann.module.emotion_classifier(features[:src_data.size()[0]])
                     pred_domain = domain_classifier(features)
 
                     # for nn.xxx, need to declare and then use because it is class
