@@ -7,7 +7,7 @@ import numpy as np
 
 
 class ArtDataset(Dataset):
-    def __init__(self, data_paths, label_paths, freq_band='all'):
+    def __init__(self, data_paths, label_paths, freq_band='all', bad_images=None):
         """Initialize dataset.
 
         Args:
@@ -21,9 +21,16 @@ class ArtDataset(Dataset):
 
         self.data = []
         self.label = []
+        choice = np.zeros(360, dtype=np.int8)
+        # delete bad images
+        if not bad_images == None:
+            for im in bad_images:
+                choice[im*4:(im+1)*4] = 1
+        
+        choice = choice == 0
         for data_path, label_path in zip(data_paths, label_paths):
-            data_ = np.load(data_path)[idx_band]
-            label_ = np.load(label_path)
+            data_ = np.load(data_path)[idx_band][choice]
+            label_ = np.load(label_path)[choice]
             
             self.data.append(data_)
             self.label.append(label_)

@@ -23,6 +23,13 @@ import torch.optim as opt
 
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.gaussian_process import GaussianProcessClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier
+from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
+from sklearn.gaussian_process.kernels import RBF
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, plot_confusion_matrix, f1_score
 # KFold is not enough, need to make sure the ratio between classes is the same in both train set and test set
@@ -103,6 +110,336 @@ class SVMTrainApp:
         # hyperparams = [{'kernel': ['rbf'], 'C': [100, 0.1], 'gamma': [0.0001, 0.00001]}]
         # refit: after hp is determined, learn the best lp over the whole dataset, this is for prediction
         self.model = GridSearchCV(SVC(),
+                                  param_grid=hyperparams,
+                                  scoring=['accuracy', 'f1_macro'],
+                                  n_jobs=-1,
+                                  refit='f1_macro',
+                                  cv=self.split_strategy,
+                                  verbose=1,
+                                  return_train_score=True)
+    
+    def main(self):
+        X = StandardScaler().fit_transform(self.data)
+        Y = self.label
+        self.model.fit(X, Y)
+        # pprint(self.model.cv_results_)
+        idx = self.model.best_index_
+
+        result = {}
+        for ph in phases:
+            result[ph] = {}
+            for ind in indicators:
+                result[ph][ind] = self.model.cv_results_['mean_'+ph+'_'+ind][idx]
+        
+        print('The best hyper parameters: {}'.format(self.model.best_params_))
+        
+        # pic_result = []
+        # for pp in range(90):
+        #     pic_result.append(self.model.cv_results_['split{}_test_accuracy'.format(pp)][idx])
+
+        # train_cm_display = plot_confusion_matrix(model, x_train, y_train, normalize='true', display_labels=['Negative', 'Neutral', 'Positive'], cmap='Blues')
+        # train_cm_display.figure_.suptitle('{}_{}_{}: Train set confusion matrix'.format(self.feature, self.freq_band, model_name))
+        # train_cm_display.figure_.savefig('./figs/{}_{}_{}_train.png'.format(self.feature, self.freq_band, model_name))
+
+        # test_cm_display = plot_confusion_matrix(model, x_test, y_test, normalize='true', display_labels=['Negative', 'Neutral', 'Positive'], cmap='Blues')
+        # test_cm_display.figure_.suptitle('{}_{}_{}: Test set confusion matrix'.format(self.feature, self.freq_band, model_name))
+        # test_cm_display.figure_.savefig('./figs/{}_{}_{}_test.png'.format(self.feature, self.freq_band, model_name))
+        # plt.close('all')
+
+        return result
+
+
+class KNNTrainApp:
+    def __init__(self, dset, split_strategy):
+        """Train classifier.
+
+        Args:
+            dset (torch dataset): the data to be fitted.
+            split_strategy (sklearn split generator): controls the type of experiment.
+        """
+        self.nsamples = dset.data.size()[0]
+        self.data = dset.data.numpy().reshape(self.nsamples, -1)
+        self.label = dset.label.numpy()
+        self.split_strategy = split_strategy
+
+        hyperparams = [{'n_neighbors': [3, 5, 10, 15]}]
+        # refit: after hp is determined, learn the best lp over the whole dataset, this is for prediction
+        self.model = GridSearchCV(KNeighborsClassifier(),
+                                  param_grid=hyperparams,
+                                  scoring=['accuracy', 'f1_macro'],
+                                  n_jobs=-1,
+                                  refit='f1_macro',
+                                  cv=self.split_strategy,
+                                  verbose=1,
+                                  return_train_score=True)
+    
+    def main(self):
+        X = StandardScaler().fit_transform(self.data)
+        Y = self.label
+        self.model.fit(X, Y)
+        # pprint(self.model.cv_results_)
+        idx = self.model.best_index_
+
+        result = {}
+        for ph in phases:
+            result[ph] = {}
+            for ind in indicators:
+                result[ph][ind] = self.model.cv_results_['mean_'+ph+'_'+ind][idx]
+        
+        print('The best hyper parameters: {}'.format(self.model.best_params_))
+        
+        # pic_result = []
+        # for pp in range(90):
+        #     pic_result.append(self.model.cv_results_['split{}_test_accuracy'.format(pp)][idx])
+
+        # train_cm_display = plot_confusion_matrix(model, x_train, y_train, normalize='true', display_labels=['Negative', 'Neutral', 'Positive'], cmap='Blues')
+        # train_cm_display.figure_.suptitle('{}_{}_{}: Train set confusion matrix'.format(self.feature, self.freq_band, model_name))
+        # train_cm_display.figure_.savefig('./figs/{}_{}_{}_train.png'.format(self.feature, self.freq_band, model_name))
+
+        # test_cm_display = plot_confusion_matrix(model, x_test, y_test, normalize='true', display_labels=['Negative', 'Neutral', 'Positive'], cmap='Blues')
+        # test_cm_display.figure_.suptitle('{}_{}_{}: Test set confusion matrix'.format(self.feature, self.freq_band, model_name))
+        # test_cm_display.figure_.savefig('./figs/{}_{}_{}_test.png'.format(self.feature, self.freq_band, model_name))
+        # plt.close('all')
+
+        return result
+        
+
+class GPTrainApp:
+    def __init__(self, dset, split_strategy):
+        """Train classifier.
+
+        Args:
+            dset (torch dataset): the data to be fitted.
+            split_strategy (sklearn split generator): controls the type of experiment.
+        """
+        self.nsamples = dset.data.size()[0]
+        self.data = dset.data.numpy().reshape(self.nsamples, -1)
+        self.label = dset.label.numpy()
+        self.split_strategy = split_strategy
+
+        hyperparams = [{'kernel': [1.0*RBF(1.0), 1.0*RBF(0.1), 1.0*RBF(10)]}]
+        # refit: after hp is determined, learn the best lp over the whole dataset, this is for prediction
+        self.model = GridSearchCV(GaussianProcessClassifier(),
+                                  param_grid=hyperparams,
+                                  scoring=['accuracy', 'f1_macro'],
+                                  n_jobs=-1,
+                                  refit='f1_macro',
+                                  cv=self.split_strategy,
+                                  verbose=1,
+                                  return_train_score=True)
+    
+    def main(self):
+        X = StandardScaler().fit_transform(self.data)
+        Y = self.label
+        self.model.fit(X, Y)
+        # pprint(self.model.cv_results_)
+        idx = self.model.best_index_
+
+        result = {}
+        for ph in phases:
+            result[ph] = {}
+            for ind in indicators:
+                result[ph][ind] = self.model.cv_results_['mean_'+ph+'_'+ind][idx]
+        
+        print('The best hyper parameters: {}'.format(self.model.best_params_))
+        
+        # pic_result = []
+        # for pp in range(90):
+        #     pic_result.append(self.model.cv_results_['split{}_test_accuracy'.format(pp)][idx])
+
+        # train_cm_display = plot_confusion_matrix(model, x_train, y_train, normalize='true', display_labels=['Negative', 'Neutral', 'Positive'], cmap='Blues')
+        # train_cm_display.figure_.suptitle('{}_{}_{}: Train set confusion matrix'.format(self.feature, self.freq_band, model_name))
+        # train_cm_display.figure_.savefig('./figs/{}_{}_{}_train.png'.format(self.feature, self.freq_band, model_name))
+
+        # test_cm_display = plot_confusion_matrix(model, x_test, y_test, normalize='true', display_labels=['Negative', 'Neutral', 'Positive'], cmap='Blues')
+        # test_cm_display.figure_.suptitle('{}_{}_{}: Test set confusion matrix'.format(self.feature, self.freq_band, model_name))
+        # test_cm_display.figure_.savefig('./figs/{}_{}_{}_test.png'.format(self.feature, self.freq_band, model_name))
+        # plt.close('all')
+
+        return result
+        
+
+class DTTrainApp:
+    def __init__(self, dset, split_strategy):
+        """Train classifier.
+
+        Args:
+            dset (torch dataset): the data to be fitted.
+            split_strategy (sklearn split generator): controls the type of experiment.
+        """
+        self.nsamples = dset.data.size()[0]
+        self.data = dset.data.numpy().reshape(self.nsamples, -1)
+        self.label = dset.label.numpy()
+        self.split_strategy = split_strategy
+
+        hyperparams = [{'criterion': ['gini', 'entropy'], 'max_depth': [5, 10, 15, 20]}]
+        # refit: after hp is determined, learn the best lp over the whole dataset, this is for prediction
+        self.model = GridSearchCV(DecisionTreeClassifier(),
+                                  param_grid=hyperparams,
+                                  scoring=['accuracy', 'f1_macro'],
+                                  n_jobs=-1,
+                                  refit='f1_macro',
+                                  cv=self.split_strategy,
+                                  verbose=1,
+                                  return_train_score=True)
+    
+    def main(self):
+        X = StandardScaler().fit_transform(self.data)
+        Y = self.label
+        self.model.fit(X, Y)
+        # pprint(self.model.cv_results_)
+        idx = self.model.best_index_
+
+        result = {}
+        for ph in phases:
+            result[ph] = {}
+            for ind in indicators:
+                result[ph][ind] = self.model.cv_results_['mean_'+ph+'_'+ind][idx]
+        
+        print('The best hyper parameters: {}'.format(self.model.best_params_))
+        
+        # pic_result = []
+        # for pp in range(90):
+        #     pic_result.append(self.model.cv_results_['split{}_test_accuracy'.format(pp)][idx])
+
+        # train_cm_display = plot_confusion_matrix(model, x_train, y_train, normalize='true', display_labels=['Negative', 'Neutral', 'Positive'], cmap='Blues')
+        # train_cm_display.figure_.suptitle('{}_{}_{}: Train set confusion matrix'.format(self.feature, self.freq_band, model_name))
+        # train_cm_display.figure_.savefig('./figs/{}_{}_{}_train.png'.format(self.feature, self.freq_band, model_name))
+
+        # test_cm_display = plot_confusion_matrix(model, x_test, y_test, normalize='true', display_labels=['Negative', 'Neutral', 'Positive'], cmap='Blues')
+        # test_cm_display.figure_.suptitle('{}_{}_{}: Test set confusion matrix'.format(self.feature, self.freq_band, model_name))
+        # test_cm_display.figure_.savefig('./figs/{}_{}_{}_test.png'.format(self.feature, self.freq_band, model_name))
+        # plt.close('all')
+
+        return result
+        
+
+class RFTrainApp:
+    def __init__(self, dset, split_strategy):
+        """Train classifier.
+
+        Args:
+            dset (torch dataset): the data to be fitted.
+            split_strategy (sklearn split generator): controls the type of experiment.
+        """
+        self.nsamples = dset.data.size()[0]
+        self.data = dset.data.numpy().reshape(self.nsamples, -1)
+        self.label = dset.label.numpy()
+        self.split_strategy = split_strategy
+
+        hyperparams = [{'n_estimators': [10, 100, 1000], 'criterion': ['gini', 'entropy'], 'max_depth':[5, 10, 15, 20]}]
+        # refit: after hp is determined, learn the best lp over the whole dataset, this is for prediction
+        self.model = GridSearchCV(RandomForestClassifier(),
+                                  param_grid=hyperparams,
+                                  scoring=['accuracy', 'f1_macro'],
+                                  n_jobs=-1,
+                                  refit='f1_macro',
+                                  cv=self.split_strategy,
+                                  verbose=1,
+                                  return_train_score=True)
+    
+    def main(self):
+        X = StandardScaler().fit_transform(self.data)
+        Y = self.label
+        self.model.fit(X, Y)
+        # pprint(self.model.cv_results_)
+        idx = self.model.best_index_
+
+        result = {}
+        for ph in phases:
+            result[ph] = {}
+            for ind in indicators:
+                result[ph][ind] = self.model.cv_results_['mean_'+ph+'_'+ind][idx]
+        
+        print('The best hyper parameters: {}'.format(self.model.best_params_))
+        
+        # pic_result = []
+        # for pp in range(90):
+        #     pic_result.append(self.model.cv_results_['split{}_test_accuracy'.format(pp)][idx])
+
+        # train_cm_display = plot_confusion_matrix(model, x_train, y_train, normalize='true', display_labels=['Negative', 'Neutral', 'Positive'], cmap='Blues')
+        # train_cm_display.figure_.suptitle('{}_{}_{}: Train set confusion matrix'.format(self.feature, self.freq_band, model_name))
+        # train_cm_display.figure_.savefig('./figs/{}_{}_{}_train.png'.format(self.feature, self.freq_band, model_name))
+
+        # test_cm_display = plot_confusion_matrix(model, x_test, y_test, normalize='true', display_labels=['Negative', 'Neutral', 'Positive'], cmap='Blues')
+        # test_cm_display.figure_.suptitle('{}_{}_{}: Test set confusion matrix'.format(self.feature, self.freq_band, model_name))
+        # test_cm_display.figure_.savefig('./figs/{}_{}_{}_test.png'.format(self.feature, self.freq_band, model_name))
+        # plt.close('all')
+
+        return result
+        
+
+class ABTrainApp:
+    def __init__(self, dset, split_strategy):
+        """Train classifier.
+
+        Args:
+            dset (torch dataset): the data to be fitted.
+            split_strategy (sklearn split generator): controls the type of experiment.
+        """
+        self.nsamples = dset.data.size()[0]
+        self.data = dset.data.numpy().reshape(self.nsamples, -1)
+        self.label = dset.label.numpy()
+        self.split_strategy = split_strategy
+
+        hyperparams = [{'n_estimators': [10, 50, 100, 200], 'learning_rate': [0.01, 0.1, 1, 10]}]
+        # refit: after hp is determined, learn the best lp over the whole dataset, this is for prediction
+        self.model = GridSearchCV(AdaBoostClassifier(),
+                                  param_grid=hyperparams,
+                                  scoring=['accuracy', 'f1_macro'],
+                                  n_jobs=-1,
+                                  refit='f1_macro',
+                                  cv=self.split_strategy,
+                                  verbose=1,
+                                  return_train_score=True)
+    
+    def main(self):
+        X = StandardScaler().fit_transform(self.data)
+        Y = self.label
+        self.model.fit(X, Y)
+        # pprint(self.model.cv_results_)
+        idx = self.model.best_index_
+
+        result = {}
+        for ph in phases:
+            result[ph] = {}
+            for ind in indicators:
+                result[ph][ind] = self.model.cv_results_['mean_'+ph+'_'+ind][idx]
+        
+        print('The best hyper parameters: {}'.format(self.model.best_params_))
+        
+        # pic_result = []
+        # for pp in range(90):
+        #     pic_result.append(self.model.cv_results_['split{}_test_accuracy'.format(pp)][idx])
+
+        # train_cm_display = plot_confusion_matrix(model, x_train, y_train, normalize='true', display_labels=['Negative', 'Neutral', 'Positive'], cmap='Blues')
+        # train_cm_display.figure_.suptitle('{}_{}_{}: Train set confusion matrix'.format(self.feature, self.freq_band, model_name))
+        # train_cm_display.figure_.savefig('./figs/{}_{}_{}_train.png'.format(self.feature, self.freq_band, model_name))
+
+        # test_cm_display = plot_confusion_matrix(model, x_test, y_test, normalize='true', display_labels=['Negative', 'Neutral', 'Positive'], cmap='Blues')
+        # test_cm_display.figure_.suptitle('{}_{}_{}: Test set confusion matrix'.format(self.feature, self.freq_band, model_name))
+        # test_cm_display.figure_.savefig('./figs/{}_{}_{}_test.png'.format(self.feature, self.freq_band, model_name))
+        # plt.close('all')
+
+        return result
+        
+
+class QDATrainApp:
+    def __init__(self, dset, split_strategy):
+        """Train classifier.
+
+        Args:
+            dset (torch dataset): the data to be fitted.
+            split_strategy (sklearn split generator): controls the type of experiment.
+        """
+        self.nsamples = dset.data.size()[0]
+        self.data = dset.data.numpy().reshape(self.nsamples, -1)
+        self.label = dset.label.numpy()
+        self.split_strategy = split_strategy
+
+        hyperparams = [{'reg_param': [0.0, 0.1, 0.5]}]
+        # refit: after hp is determined, learn the best lp over the whole dataset, this is for prediction
+        self.model = GridSearchCV(QuadraticDiscriminantAnalysis(),
                                   param_grid=hyperparams,
                                   scoring=['accuracy', 'f1_macro'],
                                   n_jobs=-1,
@@ -306,7 +643,6 @@ class DANNTrainApp:
         
         print('Best hyper parameter: lr={} lambda_={} alpha={}'.format(run.lr, run.lambda_, run.alpha))
         return result[best_run]
-
 
 
 class LSTMTrainApp:
@@ -545,15 +881,7 @@ if __name__ == '__main__':
 
                     data_path = data_dir + '/' + subject + '_data_' + feature + '.npy'
                     label_path = data_dir + '/' + subject + '_label.npy'
-                    dset = ArtDataset([data_path], [label_path], freq_band=freq)
-                    
-                    # delete bad images
-                    cho = np.zeros(360, dtype=np.int8)
-                    for im in bad_images:
-                        cho[im*4:(im+1)*4] = 1
-                    cho = cho == 0
-                    dset.data = dset.data[cho]
-                    dset.label = dset.label[cho]
+                    dset = ArtDataset([data_path], [label_path], freq_band=freq, bad_images=bad_images)
 
                     split_strategy = StratifiedShuffleSplit(n_splits=6, test_size=52)
 
@@ -567,21 +895,44 @@ if __name__ == '__main__':
                         print('>>> Model: SVM')
                         result = SVMTrainApp(dset, split_strategy).main()
                     elif args.which == 1:
-                        pass
+                        model_name = 'KNN'
+                        print('>>> Model: KNN')
+                        result = KNNTrainApp(dset, split_strategy).main()
+                    elif args.which == 2:
+                        model_name = 'GaussianProcess'
+                        print('>>> Model: GaussianProcess')
+                        result = GPTrainApp(dset, split_strategy).main()
+                    elif args.which == 3:
+                        model_name = 'DecisionTree'
+                        print('>>> Model: DecisionTree')
+                        result = DTTrainApp(dset, split_strategy).main()
+                    elif args.which == 4:
+                        model_name = 'RandomForest'
+                        print('>>> Model: RandomForest')
+                        result = RFTrainApp(dset, split_strategy).main()
+                    elif args.which == 5:
+                        model_name = 'AdaBoost'
+                        print('>>> Model: AdaBoost')
+                        result = ABTrainApp(dset, split_strategy).main()
+                    elif args.which == 6:
+                        model_name = 'QuadraticDiscriminantAnalysis'
+                        print('>>> Model: QuadraticDiscriminantAnalysis')
+                        result = QDATrainApp(dset, split_strategy).main()
                     
                     exp_result[subject] = result
             elif args.exp == 'subj_indep':
                 data_paths = [data_dir + '/' + subj + '_data_' + feature + '.npy' for subj in subjects]
                 label_paths = [data_dir + '/' + subj + '_label.npy' for subj in subjects]
-                dset = ArtDataset(data_paths, label_paths, freq_band=freq)
+                dset = ArtDataset(data_paths, label_paths, freq_band=freq, bad_images=bad_images)
 
                 for subject in subjects:
                     print('#'*10, 'Target on ', subject)
                     subj_idx = subjects.index(subject)
 
-                    test_fold = np.empty(len(subjects)*360, dtype=np.int8)
+                    nsamples_for_each_subj = (90-len(bad_images))*4
+                    test_fold = np.empty(len(subjects)*nsamples_for_each_subj, dtype=np.int8)
                     test_fold.fill(-1)
-                    test_fold[subj_idx*360: (subj_idx+1)*360] = 0
+                    test_fold[subj_idx*nsamples_for_each_subj: (subj_idx+1)*nsamples_for_each_subj] = 0
                     split_strategy = PredefinedSplit(test_fold)
                     
                     if args.which == 0:
@@ -589,6 +940,30 @@ if __name__ == '__main__':
                         print('>>> Model: SVM')
                         result = SVMTrainApp(dset, split_strategy).main()
                     elif args.which == 1:
+                        model_name = 'KNN'
+                        print('>>> Model: KNN')
+                        result = KNNTrainApp(dset, split_strategy).main()
+                    elif args.which == 2:
+                        model_name = 'GaussianProcess'
+                        print('>>> Model: GaussianProcess')
+                        result = GPTrainApp(dset, split_strategy).main()
+                    elif args.which == 3:
+                        model_name = 'DecisionTree'
+                        print('>>> Model: DecisionTree')
+                        result = DTTrainApp(dset, split_strategy).main()
+                    elif args.which == 4:
+                        model_name = 'RandomForest'
+                        print('>>> Model: RandomForest')
+                        result = RFTrainApp(dset, split_strategy).main()
+                    elif args.which == 5:
+                        model_name = 'AdaBoost'
+                        print('>>> Model: AdaBoost')
+                        result = ABTrainApp(dset, split_strategy).main()
+                    elif args.which == 6:
+                        model_name = 'QuadraticDiscriminantAnalysis'
+                        print('>>> Model: QuadraticDiscriminantAnalysis')
+                        result = QDATrainApp(dset, split_strategy).main()
+                    elif args.which == 7:
                         model_name = 'DANN'
                         print('>>> Model: DANN')
                         result = DANNTrainApp(dset, split_strategy).main()
@@ -624,7 +999,7 @@ if __name__ == '__main__':
             ax.bar_label(acc_test_rect, padding=3)
             ax.bar_label(f1_train_rect, padding=3)
             ax.bar_label(f1_test_rect, padding=3)
-            fig.savefig('./figs_cao/{}_{}_{}_{}.png'.format(args.exp, feature, freq, model_name))
+            fig.savefig('./figs_de_lds_5s/{}_{}_{}_{}.png'.format(args.exp, feature, freq, model_name))
             plt.close('all')
 
             print('====Train:\nacc: {:.4f}/{:.4f}\nf1: {:.4f}/{:.4f}'.format(subj_train_accs.mean(), subj_train_accs.std(), subj_train_f1s.mean(), subj_train_f1s.std()))
