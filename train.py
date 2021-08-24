@@ -28,6 +28,7 @@ from sklearn.metrics import accuracy_score, plot_confusion_matrix, f1_score
 # KFold is not enough, need to make sure the ratio between classes is the same in both train set and test set
 from sklearn.model_selection import GridSearchCV, StratifiedShuffleSplit, PredefinedSplit
 
+import matplotlib
 import matplotlib.pyplot as plt
 
 from dset import *
@@ -45,18 +46,18 @@ parser.add_argument('--which',
                     type=int)
 parser.add_argument('--maxepochs',
                     help='Maximum training epochs',
-                    default=300,
+                    default=1000,
                     type=int)
 
 parser.add_argument('--lr',
                     help='Learning rate',
-                    default='np.logspace(-2, -1, 2)',
+                    default='np.logspace(-5, -1, 5)',
                     type=str)
 
 # DANN hyper params
 parser.add_argument('--lambda_',
                     help='Coefficient of inverse gradient',
-                    default='np.logspace(-1, 0, 2)',
+                    default='np.logspace(-3, 0, 4)',
                     type=str)
 parser.add_argument('--alpha',
                     help='Coefficient of domain prediction loss',
@@ -79,11 +80,11 @@ args = parser.parse_args()
 # features = ['psd', 'de']
 features = ['de']
 freq_bands = ['all', 'delta', 'theta', 'alpha', 'beta', 'gamma']
-# freq_bands = ['alpha', 'beta', 'gamma']
 subjects = ['chenyi', 'huangwenjing', 'huangxingbao', 'huatong', 'wuwenrui', 'yinhao']
+bad_images = [8, 11, 21, 23, 33, 37, 50, 73, 75, 79, 88, 89]
 phases = ['train', 'test']
 indicators = ['accuracy', 'f1_macro']
-data_dir = r'/home/PublicDir/luoshuai/bcmi'
+data_dir = r'/mnt/xlancefs/home/gwl20/data_new'
 
 class SVMTrainApp:
     def __init__(self, dset, split_strategy):
@@ -98,7 +99,8 @@ class SVMTrainApp:
         self.label = dset.label.numpy()
         self.split_strategy = split_strategy
 
-        hyperparams = [{'kernel': ['rbf'], 'C': [0.01, 1, 100, 10000, 1000000], 'gamma': np.logspace(-6, -2, 5)}]
+        hyperparams = [{'kernel': ['rbf'], 'C': np.logspace(-9, 4, 14), 'gamma': np.logspace(-6, -2, 5)}]
+        # hyperparams = [{'kernel': ['rbf'], 'C': [100, 0.1], 'gamma': [0.0001, 0.00001]}]
         # refit: after hp is determined, learn the best lp over the whole dataset, this is for prediction
         self.model = GridSearchCV(SVC(),
                                   param_grid=hyperparams,
@@ -106,6 +108,7 @@ class SVMTrainApp:
                                   n_jobs=-1,
                                   refit='f1_macro',
                                   cv=self.split_strategy,
+                                  verbose=1,
                                   return_train_score=True)
     
     def main(self):
@@ -122,6 +125,10 @@ class SVMTrainApp:
                 result[ph][ind] = self.model.cv_results_['mean_'+ph+'_'+ind][idx]
         
         print('The best hyper parameters: {}'.format(self.model.best_params_))
+        
+        # pic_result = []
+        # for pp in range(90):
+        #     pic_result.append(self.model.cv_results_['split{}_test_accuracy'.format(pp)][idx])
 
         # train_cm_display = plot_confusion_matrix(model, x_train, y_train, normalize='true', display_labels=['Negative', 'Neutral', 'Positive'], cmap='Blues')
         # train_cm_display.figure_.suptitle('{}_{}_{}: Train set confusion matrix'.format(self.feature, self.freq_band, model_name))
@@ -143,7 +150,7 @@ class DANNTrainApp:
         # self.nworkers = os.cpu_count()
         self.nworkers = 0
         self.maxepochs = args.maxepochs
-        self.batch_size = 256
+        self.batch_size = 128
 
         self.use_cuda = torch.cuda.is_available()
         self.device = torch.device('cuda' if self.use_cuda else 'cpu')
@@ -226,7 +233,7 @@ class DANNTrainApp:
                 for (src_data, src_emotion_label), (tgt_data, tgt_emotion_label) in zip(source_dloader, target_dloader):
                     src_domain_label = torch.zeros(src_emotion_label.size()[0]).to(torch.long)
                     tgt_domain_label = torch.ones(tgt_emotion_label.size()[0]).to(torch.long)
-                    # (256, 62, 1, 5)
+                    # (128, 62, 1, 5)
                     x = torch.cat([src_data, tgt_data], 0).to(self.device)
                     y_emotion = src_emotion_label.to(self.device)
                     y_domain = torch.cat([src_domain_label, tgt_domain_label], 0).to(self.device)
@@ -404,6 +411,124 @@ class LSTMTrainApp:
                     print('Leave-one-out cross validation, mean: {:10.4f}, std: {:10.4f}'.format(cv_acc_mean, cv_acc_std))
 
 
+def heatmap(data, row_labels, col_labels, ax=None,
+            cbar_kw={}, cbarlabel="", **kwargs):
+    """
+    Create a heatmap from a numpy array and two lists of labels.
+
+    Parameters
+    ----------
+    data
+        A 2D numpy array of shape (N, M).
+    row_labels
+        A list or array of length N with the labels for the rows.
+    col_labels
+        A list or array of length M with the labels for the columns.
+    ax
+        A `matplotlib.axes.Axes` instance to which the heatmap is plotted.  If
+        not provided, use current axes or create a new one.  Optional.
+    cbar_kw
+        A dictionary with arguments to `matplotlib.Figure.colorbar`.  Optional.
+    cbarlabel
+        The label for the colorbar.  Optional.
+    **kwargs
+        All other arguments are forwarded to `imshow`.
+    """
+
+    if not ax:
+        ax = plt.gca()
+
+    # Plot the heatmap
+    im = ax.imshow(data, **kwargs)
+
+    # Create colorbar
+    cbar = ax.figure.colorbar(im, ax=ax, **cbar_kw)
+    cbar.ax.set_ylabel(cbarlabel, rotation=-90, va="bottom")
+
+    # We want to show all ticks...
+    ax.set_xticks(np.arange(data.shape[1]))
+    ax.set_yticks(np.arange(data.shape[0]))
+    # ... and label them with the respective list entries.
+    ax.set_xticklabels(col_labels)
+    ax.set_yticklabels(row_labels)
+
+    # Let the horizontal axes labeling appear on top.
+    ax.tick_params(top=True, bottom=False,
+                   labeltop=True, labelbottom=False)
+
+    # Rotate the tick labels and set their alignment.
+    plt.setp(ax.get_xticklabels(), rotation=-30, ha="right",
+             rotation_mode="anchor")
+
+    # Turn spines off and create white grid.
+    ax.spines[:].set_visible(False)
+
+    ax.set_xticks(np.arange(data.shape[1]+1)-.5, minor=True)
+    ax.set_yticks(np.arange(data.shape[0]+1)-.5, minor=True)
+    ax.grid(which="minor", color="w", linestyle='-', linewidth=3)
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+    return im, cbar
+
+
+def annotate_heatmap(im, data=None, valfmt="{x:.2f}",
+                     textcolors=("black", "white"),
+                     threshold=None, **textkw):
+    """
+    A function to annotate a heatmap.
+
+    Parameters
+    ----------
+    im
+        The AxesImage to be labeled.
+    data
+        Data used to annotate.  If None, the image's data is used.  Optional.
+    valfmt
+        The format of the annotations inside the heatmap.  This should either
+        use the string format method, e.g. "$ {x:.2f}", or be a
+        `matplotlib.ticker.Formatter`.  Optional.
+    textcolors
+        A pair of colors.  The first is used for values below a threshold,
+        the second for those above.  Optional.
+    threshold
+        Value in data units according to which the colors from textcolors are
+        applied.  If None (the default) uses the middle of the colormap as
+        separation.  Optional.
+    **kwargs
+        All other arguments are forwarded to each call to `text` used to create
+        the text labels.
+    """
+
+    if not isinstance(data, (list, np.ndarray)):
+        data = im.get_array()
+
+    # Normalize the threshold to the images color range.
+    if threshold is not None:
+        threshold = im.norm(threshold)
+    else:
+        threshold = im.norm(data.max())/2.
+
+    # Set default alignment to center, but allow it to be
+    # overwritten by textkw.
+    kw = dict(horizontalalignment="center",
+              verticalalignment="center")
+    kw.update(textkw)
+
+    # Get the formatter in case a string is supplied
+    if isinstance(valfmt, str):
+        valfmt = matplotlib.ticker.StrMethodFormatter(valfmt)
+
+    # Loop over the data and create a `Text` for each "pixel".
+    # Change the text's color depending on the data.
+    texts = []
+    for i in range(data.shape[0]):
+        for j in range(data.shape[1]):
+            kw.update(color=textcolors[int(im.norm(data[i, j]) > threshold)])
+            text = im.axes.text(j, i, valfmt(data[i, j], None), **kw)
+            texts.append(text)
+
+    return texts
+
 
 if __name__ == '__main__':
     print('#'*50, 'Experiment: ', args.exp)
@@ -421,7 +546,21 @@ if __name__ == '__main__':
                     data_path = data_dir + '/' + subject + '_data_' + feature + '.npy'
                     label_path = data_dir + '/' + subject + '_label.npy'
                     dset = ArtDataset([data_path], [label_path], freq_band=freq)
-                    split_strategy = StratifiedShuffleSplit(n_splits=9, test_size=100)
+                    
+                    # delete bad images
+                    cho = np.zeros(360, dtype=np.int8)
+                    for im in bad_images:
+                        cho[im*4:(im+1)*4] = 1
+                    cho = cho == 0
+                    dset.data = dset.data[cho]
+                    dset.label = dset.label[cho]
+
+                    split_strategy = StratifiedShuffleSplit(n_splits=6, test_size=52)
+
+                    # test_fold = np.empty(nsamples, dtype=np.int8)
+                    # for cao in range(90-len(bad_images)):
+                    #     test_fold[cao*4:(cao+1)*4] = cao
+                    # split_strategy = PredefinedSplit(test_fold)
                     
                     if args.which == 0:
                         model_name = 'SVM'
@@ -434,16 +573,15 @@ if __name__ == '__main__':
             elif args.exp == 'subj_indep':
                 data_paths = [data_dir + '/' + subj + '_data_' + feature + '.npy' for subj in subjects]
                 label_paths = [data_dir + '/' + subj + '_label.npy' for subj in subjects]
-                # (6*900, ...)
                 dset = ArtDataset(data_paths, label_paths, freq_band=freq)
 
                 for subject in subjects:
                     print('#'*10, 'Target on ', subject)
                     subj_idx = subjects.index(subject)
 
-                    test_fold = np.empty(5400, dtype=np.int8)
+                    test_fold = np.empty(len(subjects)*360, dtype=np.int8)
                     test_fold.fill(-1)
-                    test_fold[subj_idx*900: (subj_idx+1)*900] = 0
+                    test_fold[subj_idx*360: (subj_idx+1)*360] = 0
                     split_strategy = PredefinedSplit(test_fold)
                     
                     if args.which == 0:
@@ -486,10 +624,18 @@ if __name__ == '__main__':
             ax.bar_label(acc_test_rect, padding=3)
             ax.bar_label(f1_train_rect, padding=3)
             ax.bar_label(f1_test_rect, padding=3)
-            fig.savefig('./figs/{}_{}_{}_{}.png'.format(args.exp, feature, freq, model_name))
+            fig.savefig('./figs_cao/{}_{}_{}_{}.png'.format(args.exp, feature, freq, model_name))
             plt.close('all')
 
             print('====Train:\nacc: {:.4f}/{:.4f}\nf1: {:.4f}/{:.4f}'.format(subj_train_accs.mean(), subj_train_accs.std(), subj_train_f1s.mean(), subj_train_f1s.std()))
             print('====Test:\nacc: {:.4f}/{:.4f}\nf1: {:.4f}/{:.4f}'.format(subj_test_accs.mean(), subj_test_accs.std(), subj_test_f1s.mean(), subj_test_f1s.std()))
 
+            # plt.style.use('default')
+            # dta = np.array([pic_results[sj] for sj in subjects])
+            # imgs = list(range(90))
+            # fig2, ax2 = plt.subplots(figsize=(30.8, 4.8))
+            # im, cbar = heatmap(dta, subjects, imgs, ax=ax2, cmap="YlGn", cbarlabel="acc")
+            # # texts = annotate_heatmap(im, valfmt="{x:.4f}")
+            # fig2.savefig('./figs_cao/{}_{}_{}_{}_picresult.png'.format(args.exp, feature, freq, model_name))
+            # plt.close('all')
 
