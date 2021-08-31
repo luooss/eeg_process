@@ -31,7 +31,7 @@ from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier
 from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
 from sklearn.gaussian_process.kernels import RBF
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score, plot_confusion_matrix, f1_score
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 # KFold is not enough, need to make sure the ratio between classes is the same in both train set and test set
 from sklearn.model_selection import GridSearchCV, StratifiedShuffleSplit, PredefinedSplit
 
@@ -106,8 +106,8 @@ class SVMTrainApp:
         self.label = dset.label.numpy()
         self.split_strategy = split_strategy
 
-        hyperparams = [{'kernel': ['rbf'], 'C': np.logspace(-9, 4, 14), 'gamma': np.logspace(-6, -2, 5)}]
-        # hyperparams = [{'kernel': ['rbf'], 'C': [100, 0.1], 'gamma': [0.0001, 0.00001]}]
+        # hyperparams = [{'kernel': ['rbf'], 'C': np.logspace(-9, 4, 14), 'gamma': np.logspace(-6, -2, 5)}]
+        hyperparams = [{'kernel': ['linear'], 'C': np.logspace(-9, 4, 14)}]
         # refit: after hp is determined, learn the best lp over the whole dataset, this is for prediction
         self.model = GridSearchCV(SVC(),
                                   param_grid=hyperparams,
@@ -130,9 +130,18 @@ class SVMTrainApp:
             result[ph] = {}
             for ind in indicators:
                 result[ph][ind] = self.model.cv_results_['mean_'+ph+'_'+ind][idx]
-        
+
         print('The best hyper parameters: {}'.format(self.model.best_params_))
-        
+
+        pred = self.model.best_estimator_.predict(X)
+        overall_acc = accuracy_score(Y, pred)
+        overall_f1 = f1_score(Y, pred, average='macro')
+        overall_class_acc = confusion_matrix(Y, pred, normalize='true').diagonal()
+
+        print('Overall acc: {:.4f}'.format(overall_acc))
+        print('Overall f1: {:.4f}'.format(overall_f1))
+        print('Class Acc: ', overall_class_acc)
+
         # pic_result = []
         # for pp in range(90):
         #     pic_result.append(self.model.cv_results_['split{}_test_accuracy'.format(pp)][idx])
@@ -999,7 +1008,7 @@ if __name__ == '__main__':
             ax.bar_label(acc_test_rect, padding=3)
             ax.bar_label(f1_train_rect, padding=3)
             ax.bar_label(f1_test_rect, padding=3)
-            fig.savefig('./figs_de_lds_5s/{}_{}_{}_{}.png'.format(args.exp, feature, freq, model_name))
+            fig.savefig('./figs_de_lds_5s_withoutproc/{}_{}_{}_{}.png'.format(args.exp, feature, freq, model_name))
             plt.close('all')
 
             print('====Train:\nacc: {:.4f}/{:.4f}\nf1: {:.4f}/{:.4f}'.format(subj_train_accs.mean(), subj_train_accs.std(), subj_train_f1s.mean(), subj_train_f1s.std()))
