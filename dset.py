@@ -21,11 +21,11 @@ class ArtDataset(Dataset):
 
         self.data = []
         self.label = []
-        choice = np.zeros(360, dtype=np.int8)
+        choice = np.zeros(1800, dtype=np.int8)
         # delete bad images
         if not bad_images == None:
             for im in bad_images:
-                choice[im*4:(im+1)*4] = 1
+                choice[im*30:(im+1)*30] = 1
         
         choice = choice == 0
         for data_path, label_path in zip(data_paths, label_paths):

@@ -84,14 +84,13 @@ parser.add_argument('--num_layers',
 
 args = parser.parse_args()
 
-# features = ['psd', 'de']
-features = ['de']
+features = ['psd', 'de']
 freq_bands = ['all', 'delta', 'theta', 'alpha', 'beta', 'gamma']
-subjects = ['chenyi', 'huangwenjing', 'huangxingbao', 'huatong', 'wuwenrui', 'yinhao']
-bad_images = [8, 11, 21, 23, 33, 37, 50, 73, 75, 79, 88, 89]
+subjects = ['zhuyangxiangru', 'zhaosijia']
+bad_images = []
 phases = ['train', 'test']
 indicators = ['accuracy', 'f1_macro']
-data_dir = r'/mnt/xlancefs/home/gwl20/data_new'
+data_dir = r'/mnt/xlancefs/home/gwl20/data_embc'
 
 class SVMTrainApp:
     def __init__(self, dset, split_strategy):
@@ -107,7 +106,8 @@ class SVMTrainApp:
         self.split_strategy = split_strategy
 
         # hyperparams = [{'kernel': ['rbf'], 'C': np.logspace(-9, 4, 14), 'gamma': np.logspace(-6, -2, 5)}]
-        hyperparams = [{'kernel': ['linear'], 'C': np.logspace(-9, 4, 14)}]
+        # hyperparams = [{'kernel': ['linear'], 'C': np.logspace(-9, 5, 8)}]
+        hyperparams = [{'kernel': ['linear'], 'C': [1e-5, 1e-2, 100, 10000]}]
         # refit: after hp is determined, learn the best lp over the whole dataset, this is for prediction
         self.model = GridSearchCV(SVC(),
                                   param_grid=hyperparams,
@@ -115,7 +115,7 @@ class SVMTrainApp:
                                   n_jobs=-1,
                                   refit='f1_macro',
                                   cv=self.split_strategy,
-                                  verbose=1,
+                                  verbose=2,
                                   return_train_score=True)
     
     def main(self):
@@ -487,7 +487,6 @@ class QDATrainApp:
 
         return result
         
-
 
 class DANNTrainApp:
     def __init__(self, dset, split_strategy):
@@ -890,9 +889,9 @@ if __name__ == '__main__':
 
                     data_path = data_dir + '/' + subject + '_data_' + feature + '.npy'
                     label_path = data_dir + '/' + subject + '_label.npy'
-                    dset = ArtDataset([data_path], [label_path], freq_band=freq, bad_images=bad_images)
+                    dset = ArtDataset([data_path], [label_path], freq_band=freq)
 
-                    split_strategy = StratifiedShuffleSplit(n_splits=6, test_size=52)
+                    split_strategy = StratifiedShuffleSplit(n_splits=6, test_size=300)
 
                     # test_fold = np.empty(nsamples, dtype=np.int8)
                     # for cao in range(90-len(bad_images)):
@@ -932,13 +931,13 @@ if __name__ == '__main__':
             elif args.exp == 'subj_indep':
                 data_paths = [data_dir + '/' + subj + '_data_' + feature + '.npy' for subj in subjects]
                 label_paths = [data_dir + '/' + subj + '_label.npy' for subj in subjects]
-                dset = ArtDataset(data_paths, label_paths, freq_band=freq, bad_images=bad_images)
+                dset = ArtDataset(data_paths, label_paths, freq_band=freq)
 
                 for subject in subjects:
                     print('#'*10, 'Target on ', subject)
                     subj_idx = subjects.index(subject)
 
-                    nsamples_for_each_subj = (90-len(bad_images))*4
+                    nsamples_for_each_subj = (60-len(bad_images))*30
                     test_fold = np.empty(len(subjects)*nsamples_for_each_subj, dtype=np.int8)
                     test_fold.fill(-1)
                     test_fold[subj_idx*nsamples_for_each_subj: (subj_idx+1)*nsamples_for_each_subj] = 0
@@ -1008,7 +1007,7 @@ if __name__ == '__main__':
             ax.bar_label(acc_test_rect, padding=3)
             ax.bar_label(f1_train_rect, padding=3)
             ax.bar_label(f1_test_rect, padding=3)
-            fig.savefig('./figs_de_lds_5s_withoutproc/{}_{}_{}_{}.png'.format(args.exp, feature, freq, model_name))
+            fig.savefig('./figs_1s_embc/{}_{}_{}_{}.png'.format(args.exp, feature, freq, model_name))
             plt.close('all')
 
             print('====Train:\nacc: {:.4f}/{:.4f}\nf1: {:.4f}/{:.4f}'.format(subj_train_accs.mean(), subj_train_accs.std(), subj_train_f1s.mean(), subj_train_f1s.std()))

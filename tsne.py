@@ -15,6 +15,7 @@
 import numpy as np
 from dset import *
 import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
 
 
 def Hbeta(D=np.array([]), beta=1.0):
