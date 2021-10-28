@@ -107,7 +107,7 @@ class SVMTrainApp:
 
         # hyperparams = [{'kernel': ['rbf'], 'C': np.logspace(-9, 4, 14), 'gamma': np.logspace(-6, -2, 5)}]
         # hyperparams = [{'kernel': ['linear'], 'C': np.logspace(-9, 5, 8)}]
-        hyperparams = [{'kernel': ['linear'], 'C': [1e-5, 1e-2, 100, 10000]}]
+        hyperparams = [{'kernel': ['linear'], 'C': [1e-5, 1e-2, 1, 10]}]
         # refit: after hp is determined, learn the best lp over the whole dataset, this is for prediction
         self.model = GridSearchCV(SVC(),
                                   param_grid=hyperparams,
