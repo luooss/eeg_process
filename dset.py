@@ -4,10 +4,92 @@ import torch
 from torch.utils.data import Dataset
 import scipy.io as sio
 import numpy as np
+from torch_geometric.data import InMemoryDataset, Data
+
+
+freq_bands = ['all', 'delta', 'theta', 'alpha', 'beta', 'gamma']
+data_path_temp = r'/mnt/xlancefs/home/gwl20/data20211118/data/{}s/{}_data_{}_{}s.npy'
+label_path_temp = r'/mnt/xlancefs/home/gwl20/data20211118/data/{}s/{}_label_{}s.npy'
+
+img_order = np.load(r'img_order.npy', allow_pickle=True).item()
+
+# train test set into separate Datasets
+class ArtGraphDataset(InMemoryDataset):
+    def __init__(self, slice_length, feature, freq_band, subjects, exclude_images, root, transform=None, pre_transform=None):
+        """[summary]
+
+        Args:
+            slice_length (int): 1s, 3s, 5s
+            feature (str): psd, de
+            freq_band (str): 
+            subjects (list of str): 
+            exclude_images (dict): 
+            root (str): 
+            transform ([type], optional): [description]. Defaults to None.
+            pre_transform ([type], optional): [description]. Defaults to None.
+        """
+        super(ArtGraphDataset, self).__init__(root, transform, pre_transform)
+        self.slice_length = slice_length
+        self.feature = feature
+        self.idx_band = freq_bands.index(freq_band)
+        assert len(subjects) == len(exclude_images)
+        self.subjects = subjects
+        self.exclude_images = exclude_images
+        self.data, self.slices = torch.load(self.processed_paths[0])
+
+    @property
+    def raw_file_names(self):
+        return []
+
+    @property
+    def processed_file_names(self):
+        return ['data.pt']
+
+    def download(self):
+        # Download to `self.raw_dir`
+        pass
+
+    def process(self):
+        # Read data into huge `Data` list.
+        data_list = []
+        for subject in self.subjects:
+            data_path = data_path_temp.format(self.slice_length, subject, self.feature, self.slice_length)
+            label_path = label_path_temp.format(self.slice_length, subject, self.slice_length)
+            ncases_per_img = int(30 / self.slice_length)
+            image_order = img_order[subject]
+            excl_imgs = self.exclude_images[subject]
+            mask = np.ones((60*ncases_per_img, ), dtype=int)
+            for img in excl_imgs:
+                idx = image_order.index(img)
+                mask[idx*ncases_per_img : (idx+1)*ncases_per_img] = 0
+            mask = mask == 1
+            # (ncases, 62, 5, nseconds)
+            data = np.load(data_path)[self.idx_band][mask]
+            label = np.load(label_path)[mask]
+            ncases = data.shape[0]
+            for i in range(ncases):
+                # simply flatten
+                x = torch.tensor(np.reshape(data[i], [62, -1]), dtype=torch.float)
+                y = torch.tensor([label[i]], dtype=torch.long)
+                edge_index = [[i, j] for i in range(62) for j in range(62)]
+                edge_index = torch.tensor(edge_index, dtype=torch.long).t()
+                assert edge_index.shape[1] == 62 * 62
+                graph_data = Data(x=x, edge_index=edge_index, y=y)
+                data_list.append(graph_data)
+
+        if self.pre_filter is not None:
+            data_list = [data for data in data_list if self.pre_filter(data)]
+
+        if self.pre_transform is not None:
+            data_list = [self.pre_transform(data) for data in data_list]
+
+        data, slices = self.collate(data_list)
+        torch.save((data, slices), self.processed_paths[0])
+
 
 
 class ArtDataset(Dataset):
-    def __init__(self, data_paths, label_paths, freq_band='all', bad_images=None):
+    def __init__(self, data_paths, label_paths, freq_band='all'):
         """Initialize dataset.
 
         Args:
@@ -21,16 +103,10 @@ class ArtDataset(Dataset):
 
         self.data = []
         self.label = []
-        choice = np.zeros(1800, dtype=np.int8)
-        # delete bad images
-        if not bad_images == None:
-            for im in bad_images:
-                choice[im*30:(im+1)*30] = 1
         
-        choice = choice == 0
         for data_path, label_path in zip(data_paths, label_paths):
-            data_ = np.load(data_path)[idx_band][choice]
-            label_ = np.load(label_path)[choice]
+            data_ = np.load(data_path)[idx_band]
+            label_ = np.load(label_path)
             
             self.data.append(data_)
             self.label.append(label_)

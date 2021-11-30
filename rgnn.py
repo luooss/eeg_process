@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
-from torch.autograd import Function
 import torch.nn.functional as F
+from torch.autograd import Function
 from torch_geometric.nn import SGConv, global_add_pool
 from torch_scatter import scatter_add
 
@@ -34,7 +34,8 @@ def add_remaining_self_loops(edge_index, edge_weight=None, fill_value=1, num_nod
 
 
 class NewSGConv(SGConv):
-    def __init__(self, num_features, num_classes, K=1, cached=False, bias=True):
+    def __init__(self, num_features, num_classes, K=1, cached=False,
+                 bias=True):
         super(NewSGConv, self).__init__(num_features, num_classes, K=K, cached=cached, bias=bias)
 
     # allow negative edge weights
@@ -136,92 +137,3 @@ class SymSimGCNNet(torch.nn.Module):
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.fc(x)
         return x, domain_output
-
-
-class GradientReversalFuntion(Function):
-    @staticmethod
-    def forward(ctx, x, lambda_):
-        ctx.lambda_ = lambda_
-        return x.clone()
-
-    @staticmethod
-    def backward(ctx, grads):
-        lambda_ = ctx.lambda_
-        lambda_ = grads.new_tensor(lambda_)
-        dx = -lambda_ * grads
-        return dx, None
-
-class GradientReversalLayer(nn.Module):
-    def __init__(self, lambda_=1):
-        super().__init__()
-        self.lambda_ = lambda_
-
-    def forward(self, x):
-        return GradientReversalFuntion.apply(x, self.lambda_)
-
-class SGCFeatureExtractor(nn.Module):
-    def __init__(self, num_nodes, learn_edge_weight, edge_weight, num_features, num_hidden, K):
-        """
-            num_nodes: number of nodes in the graph
-            learn_edge_weight: if True, the edge_weight is learnable
-            edge_weight: initial edge matrix
-            num_features: feature dim for each node/channel
-            num_hidden: hidden dimensions
-            num_classes: number of emotion classes
-            K: number of layers
-            dropout: dropout rate in final linear layer
-            domain_adaptation: RevGrad
-        """
-        super(SGCFeatureExtractor, self).__init__()
-        self.num_nodes = num_nodes
-        self.xs, self.ys = torch.tril_indices(self.num_nodes, self.num_nodes, offset=0)
-        # num_edges = num_nodes * num_nodes
-        # num_edgeweights_tolearn = (num_nodes * num_nodes + num_nodes) / 2
-        # torch.Size([num_edgeweights_tolearn])
-        edge_weight = edge_weight.reshape(self.num_nodes, self.num_nodes)[self.xs, self.ys] # strict lower triangular values
-        self.edge_weight = nn.Parameter(edge_weight, requires_grad=learn_edge_weight)
-        self.conv1 = NewSGConv(num_features=num_features, num_classes=num_hidden, K=K)
-
-    def forward(self, data):
-        # data: torch.geometric.data.Batch
-        # num_graphs
-        batch_size = len(data.y)
-        # x: torch.Size([num_graphs*num_nodes, num_node_features])
-        # edge_index: torch.Size([2, sum of num_edges for each graph])
-        x, edge_index = data.x, data.edge_index
-        edge_weight = torch.zeros((self.num_nodes, self.num_nodes), device=edge_index.device)
-        edge_weight[self.xs.to(edge_weight.device), self.ys.to(edge_weight.device)] = self.edge_weight
-        edge_weight = edge_weight + edge_weight.transpose(1,0) - torch.diag(edge_weight.diagonal()) # copy values from lower tri to upper tri
-        # torch.Size([num_graphs*num_nodes*num_nodes])
-        edge_weight = edge_weight.reshape(-1).repeat(batch_size)
-        x = F.relu(self.conv1(x, edge_index, edge_weight))
-        x = global_add_pool(x, data.batch, size=batch_size)
-        return x
-
-
-class LabelClassifier(nn.Module):
-    def __init__(self, num_hidden, dropout):
-        super(LabelClassifier, self).__init__()
-        # if you want to apply additional operations in between layers, wirte them separately
-        # or use nn.Sequential()
-        self.dropout = dropout
-        self.fc = nn.Linear(num_hidden, 3)
-        self.lsm = nn.LogSoftmax(dim=1)
-
-    def forward(self, x):
-        a = F.dropout(x, p=self.dropout, training=self.training)
-        a = self.lsm(self.fc(a))
-        return a
-
-
-class DomainClassifier(nn.Module):
-    def __init__(self, num_hidden, lambda_):
-        super(DomainClassifier, self).__init__()
-        self.gradrev = GradientReversalLayer(lambda_=lambda_)
-        self.fc = nn.Linear(num_hidden, 2)
-        self.lsm = nn.LogSoftmax(dim=1)
-
-    def forward(self, x):
-        a = self.gradrev(x)
-        a = self.lsm(self.fc(a))
-        return a

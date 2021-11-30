@@ -2,7 +2,6 @@ import os
 import argparse
 import time
 import random
-import math
 from pprint import pprint
 from numpy.lib.function_base import average
 import numpy as np
@@ -21,8 +20,6 @@ from torch.utils.tensorboard import SummaryWriter
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as opt
-
-from torch_geometric.data import DataLoader
 
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
@@ -51,47 +48,31 @@ parser.add_argument('--exp',
                     default='subj_dep',
                     type=str)
 parser.add_argument('--which',
-                    help='Which model to train: 0-SVM, 1-GNN',
+                    help='Which model to train: 0-SVM, 1-DANN, 2-LSTM',
                     default=0,
                     type=int)
 parser.add_argument('--slice_length',
                     help='in seconds',
                     default=1,
                     type=int)
-parser.add_argument('--feature',
-                    help='psd, de',
-                    default='de',
-                    type=str)
 parser.add_argument('--maxepochs',
                     help='Maximum training epochs',
                     default=1000,
                     type=int)
+
 parser.add_argument('--lr',
                     help='Learning rate',
                     default='np.logspace(-5, -1, 5)',
                     type=str)
 
-# GNN hyper params
-# (5, 1), (5, 3), (5, 5)
-parser.add_argument('--num_hidden',
-                    help='The dimensionality of the learned embedding for nodes',
-                    default='[3, 5, 8, 13, 15, 25]',
-                    type=str)
-parser.add_argument('--K',
-                    help='Number of layers',
-                    default='[3, 5, 8]',
-                    type=str)
-parser.add_argument('--dropout',
-                    help='Dropout',
-                    default='[0.5, 0.7]',
-                    type=str)
+# DANN hyper params
 parser.add_argument('--lambda_',
                     help='Coefficient of inverse gradient',
-                    default='np.logspace(-4, 0, 5)',
+                    default='np.logspace(-3, 0, 4)',
                     type=str)
 parser.add_argument('--alpha',
                     help='Coefficient of domain prediction loss',
-                    default='np.logspace(-4, 0, 5)',
+                    default='np.logspace(-7, -4, 4)',
                     type=str)
 
 # LSTM hyper-parameters
@@ -107,9 +88,13 @@ parser.add_argument('--num_layers',
 
 args = parser.parse_args()
 
+features = ['psd', 'de']
+freq_bands = ['all', 'delta', 'theta', 'alpha', 'beta', 'gamma']
 subjects = ['zhuyangxiangru', 'zhaosijia', 'feicheng', 'xiajingtao', 'wangyanchu', 'zhangliuxin', 'panshuyi', 'hexingtao', 'chenbingliang', 'chengyuting']
+ncases_each_subj = [56, 59, 56, 49, 59, 52, 56, 48, 54, 56]
 phases = ['train', 'test']
 indicators = ['accuracy', 'f1_macro']
+data_dir = r'/mnt/xlancefs/home/gwl20/data_embc_2cat/features'
 
 class SVMTrainApp:
     def __init__(self, dset, split_strategy):
@@ -134,11 +119,10 @@ class SVMTrainApp:
                                   n_jobs=-1,
                                   refit='f1_macro',
                                   cv=self.split_strategy,
-                                  verbose=1,
+                                  verbose=2,
                                   return_train_score=True)
     
     def main(self):
-        # 在什么维度上归一化？
         X = StandardScaler().fit_transform(self.data)
         Y = self.label
         self.model.fit(X, Y)
@@ -176,172 +160,6 @@ class SVMTrainApp:
         # plt.close('all')
 
         return result
-
-
-class GNNDomainAdaptationTrainApp:
-    def __init__(self, train_dset, test_dset, label_type):
-        self.train_dset = train_dset
-        self.test_dset = test_dset
-        self.label_type = label_type
-        self.nworkers = os.cpu_count()
-        self.maxepochs = args.maxepochs
-
-        self.use_cuda = torch.cuda.is_available()
-        self.device = torch.device('cuda' if self.use_cuda else 'cpu')
-    
-    def get_runs(self):
-        params = OrderedDict(lr = eval(args.lr),
-                                num_hidden = eval(args.num_hidden),
-                                K = eval(args.K),
-                                dropout=eval(args.dropout),
-                                lambda_ = eval(args.lambda_),
-                                alpha = eval(args.alpha))
-        
-        Run = namedtuple('Run', params.keys())
-        runs = []
-        for v in product(*params.values()):
-            runs.append(Run(*v))
-
-        return runs
-    
-    def getInitialEdgeWeightMatrix():
-        pass
-
-    def getModel(self, num_hidden, K, dropout, lambda_):
-        edge_weight = self.getInitialEdgeWeightMatrix()
-        sgc = SGCFeatureExtractor(num_nodes=62,
-                                  learn_edge_weight=True,
-                                  edge_weight=edge_weight,
-                                  num_features=self.dset.num_node_features,
-                                  num_hidden=num_hidden,
-                                  K=K)
-        label_classifier = LabelClassifier(num_hidden, dropout)
-        domain_classifier = DomainClassifier(num_hidden, lambda_)
-        
-        if self.use_cuda:
-            print('Using cuda. Total {:d} devices.'.format(torch.cuda.device_count()))
-            if torch.cuda.device_count() > 1:
-                sgc = nn.DataParallel(sgc)
-                label_classifier = nn.DataParallel(label_classifier)
-                domain_classifier = nn.DataParallel(domain_classifier)
-        else:
-            print('Using cpu.')
-
-        return sgc.to(self.device), label_classifier.to(self.device), domain_classifier.to(self.device)
-
-    def main(self):
-        runs = self.get_runs()
-        result = {}
-        for run in runs:
-            result[run] = {}
-            for ph in phases:
-                result[run][ph] = {}
-
-        for run in runs:
-            comment = ' RGNN lr={} num_hidden={} K={} dropout={} lambda_={} alpha={}'.format(run.lr, run.num_hidden, run.K, run.dropout, run.lambda_, run.alpha)
-            
-            dann_writer = SummaryWriter(comment=comment)
-
-            print('Hyper Parameter test: ' + comment)
-            start_outer = time.time()
-
-            train_dloader = DataLoader(self.train_dset, batch_size=8, shuffle=True, drop_last=True)
-            test_dloader = DataLoader(self.test_dset, batch_size=8, shuffle=True)
-
-            sgc, label_classifier, domain_classifier = self.getModel(run.num_hidden, run.K, run.dropout, run.lambda_)
-
-            optim = torch.optim.Adam(list(sgc.parameters())+list(label_classifier.parameters())+list(domain_classifier.parameters()), lr=run.lr, weight_decay=1e-5)
-            
-            for epoch in tqdm(range(1, self.maxepochs+1)):
-                loss, label_loss, domain_loss = 0, 0, 0
-                label_pred_accuracy, domain_pred_accuracy = 0, 0
-
-                batches = zip(train_dloader, test_dloader)
-                n_batches = min(len(train_dloader), len(test_dloader))
-                for train_graph_batch, test_graph_batch in tqdm(batches, leave=False, total=n_batches):
-                    train_graph_batch = train_graph_batch.to(self.device)
-                    test_graph_batch = test_graph_batch.to(self.device)
-
-                    train_domain_label = torch.zeros(8).to(torch.long).to(self.device)
-                    test_domain_label = torch.ones(8).to(torch.long).to(self.device)
-
-                    # (batch_size, num_hidden)
-                    train_sgc_output = sgc(train_graph_batch)
-                    test_sgc_output = sgc(test_graph_batch)
-                    # (batch_size, 3)
-                    train_labcl_output = label_classifier(train_sgc_output)
-                    # (batch_size, 2)
-                    train_domcl_output = domain_classifier(train_sgc_output)
-                    test_domcl_output = domain_classifier(test_sgc_output)
-
-                    # for nn.xxx, need to declare and then use because it is class
-                    # for nn.functional.xxx, use directly
-                    if self.label_type == 'hard':
-                        label_loss_b = F.nll_loss(train_labcl_output, train_graph_batch.y)
-                        emotion_loss += emotion_loss_b
-                        domain_loss_b = F.nll_loss(pred_domain, y_domain)
-                        domain_loss += domain_loss_b
-                        loss_b = emotion_loss_b + run.alpha * domain_loss_b
-                        loss += loss_b
-                    elif self.label_type == 'soft':
-                        y = self.getSoftLabel()
-                        label_loss_b = F.kl_div(train_labcl_output, y)
-
-                    optim.zero_grad()
-                    loss_b.backward()
-                    optim.step()
-
-                    emotion_pred_accuracy += (pred_emotion.max(dim=1)[1] == y_emotion).float().mean().item()
-                    domain_pred_accuracy += (pred_domain.max(dim=1)[1] == y_domain).float().mean().item()
-
-                epa_mean = emotion_pred_accuracy / nbatches  # expected to increase
-                dpa_mean = domain_pred_accuracy / nbatches  # expected to approximate 50%
-
-                dann_writer.add_scalar('loss/total_loss', loss, epoch)
-                dann_writer.add_scalar('loss/emotion_loss', emotion_loss, epoch)
-                dann_writer.add_scalar('loss/domain_loss', domain_loss, epoch)
-                dann_writer.add_scalar('accuracy/emotion_pred_accuracy', epa_mean, epoch)
-                dann_writer.add_scalar('accuracy/domain_pred_accuracy', dpa_mean, epoch)
-                dann_writer.flush()
-                dann_writer.close()
-
-                if epoch == 1 or epoch % 100 == 0:
-                    tqdm.write('Epoch {:6d}: train_emotion_pred_accuracy {:.4f}, train_domain_pred_accuracy {:.4f}'.format(epoch, epa_mean, dpa_mean))
-            
-            validation_dloaders = [source_dloader, target_dloader]
-            # validation on train set, test set
-            for ph, der in zip(phases, validation_dloaders):
-                with torch.no_grad():
-                    y_true, y_pred = [], []
-                    for tx, ty_e in der:
-                        tx = tx.to(self.device, non_blocking=True)
-                        ty_e = ty_e.to(self.device, non_blocking=True)
-
-                        tpred_e = dann(tx)
-                        y_p = tpred_e.max(dim=1)[1].to(device='cpu').numpy()
-                        y_t = ty_e.to(device='cpu').numpy()
-                        y_true.append(y_t)
-                        y_pred.append(y_p)
-                    
-                    y_true = np.concatenate(y_true, axis=0)
-                    y_pred = np.concatenate(y_pred, axis=0)
-                    acc = accuracy_score(y_true, y_pred)
-                    f1_macro = f1_score(y_true, y_pred, average='macro')
-                    result[run][ph]['accuracy'] = acc
-                    result[run][ph]['f1_macro'] = f1_macro
-                    tqdm.write('For this run, {} set accuracy/f1: {:.4f}/{:.4f}'.format(ph, acc, f1_macro))
-        
-            end_outer = time.time()
-            dur_outer = end_outer - start_outer
-            print('For this run, train time: {:4d}min {:2d}sec'.format(int(dur_outer // 60), int(dur_outer % 60)))
-        
-        best_run = runs[0]
-        for run in runs:
-            if(result[run]['test']['f1_macro'] > result[best_run]['test']['f1_macro']):
-                best_run = run
-        
-        print('Best hyper parameter: lr={} lambda_={} alpha={}'.format(run.lr, run.lambda_, run.alpha))
-        return result[best_run]
 
 
 class KNNTrainApp:
@@ -1062,153 +880,153 @@ def annotate_heatmap(im, data=None, valfmt="{x:.2f}",
 
 if __name__ == '__main__':
     nslices_per_img = int(30 / args.slice_length)
-    nsamples = 60 * nslices_per_img
 
     print('#'*50, 'Experiment: ', args.exp)
-    feature = args.feature
-    print('#'*30, 'Feature: ', feature)
-    for freq in freq_bands:
-        print('#'*20, 'Freq. Band: ', freq)
-        model_name = None
-        exp_result = {}
+    for feature in features:
+        print('#'*30, 'Feature: ', feature)
+        for freq in freq_bands:
+            print('#'*20, 'Freq. Band: ', freq)
+            model_name = None
+            exp_result = {}
 
-        if args.exp == 'subj_dep':
-            for subject in subjects:
-                print('#'*10, 'Train on ', subject)
+            if args.exp == 'subj_dep':
+                for subject in subjects:
+                    print('#'*10, 'Train on ', subject)
 
-                data_path = data_dir + '{}sAll/{}_data_{}_{}s.npy'.format(args.slice_length, subject, feature, args.slice_length)
-                label_path = data_dir + '{}sAll/{}_label_{}s.npy'.format(args.slice_length, subject, args.slice_length)
-                dset = ArtDataset([data_path], [label_path], freq_band=freq)
-                
-                split_strategy = StratifiedShuffleSplit(n_splits=6, test_size=int(nsamples/6))
-                
-                if args.which == 0:
-                    model_name = 'SVM'
-                    print('>>> Model: SVM')
-                    result = SVMTrainApp(dset, split_strategy).main()
-                elif args.which == 1:
-                    model_name = 'GNN'
-                    print('>>> Model: GNN')
-                    result = GNNTrainApp(dset, split_strategy).main()
-                elif args.which == 2:
-                    model_name = 'KNN'
-                    print('>>> Model: KNN')
-                    result = KNNTrainApp(dset, split_strategy).main()
-                elif args.which == 3:
-                    model_name = 'GaussianProcess'
-                    print('>>> Model: GaussianProcess')
-                    result = GPTrainApp(dset, split_strategy).main()
-                elif args.which == 4:
-                    model_name = 'DecisionTree'
-                    print('>>> Model: DecisionTree')
-                    result = DTTrainApp(dset, split_strategy).main()
-                elif args.which == 5:
-                    model_name = 'RandomForest'
-                    print('>>> Model: RandomForest')
-                    result = RFTrainApp(dset, split_strategy).main()
-                elif args.which == 6:
-                    model_name = 'AdaBoost'
-                    print('>>> Model: AdaBoost')
-                    result = ABTrainApp(dset, split_strategy).main()
-                elif args.which == 7:
-                    model_name = 'QuadraticDiscriminantAnalysis'
-                    print('>>> Model: QuadraticDiscriminantAnalysis')
-                    result = QDATrainApp(dset, split_strategy).main()
-                
-                exp_result[subject] = result
-        elif args.exp == 'subj_indep':
-            data_paths = [data_dir + '{}sAll/{}_data_{}_{}s.npy'.format(args.slice_length, subj, feature, args.slice_length) for subj in subjects]
-            label_paths = [data_dir + '{}sAll/{}_label_{}s.npy'.format(args.slice_length, subj, args.slice_length) for subj in subjects]
-            dset = ArtDataset(data_paths, label_paths, freq_band=freq)
+                    data_path = data_dir + '/' + subject + '_data_' + feature + '_' + str(args.slice_length) + 's.npy'
+                    label_path = data_dir + '/' + subject + '_label_' + str(args.slice_length) + 's.npy'
+                    dset = ArtDataset([data_path], [label_path], freq_band=freq)
+                    
+                    split_strategy = StratifiedShuffleSplit(n_splits=6, test_size=1/6.0)
 
-            for subject in subjects:
-                print('#'*10, 'Target on ', subject)
-                subj_idx = subjects.index(subject)
+                    # test_fold = np.empty(nsamples, dtype=np.int8)
+                    # for cao in range(90-len(bad_images)):
+                    #     test_fold[cao*4:(cao+1)*4] = cao
+                    # split_strategy = PredefinedSplit(test_fold)
+                    
+                    if args.which == 0:
+                        model_name = 'SVM'
+                        print('>>> Model: SVM')
+                        result = SVMTrainApp(dset, split_strategy).main()
+                    elif args.which == 1:
+                        model_name = 'KNN'
+                        print('>>> Model: KNN')
+                        result = KNNTrainApp(dset, split_strategy).main()
+                    elif args.which == 2:
+                        model_name = 'GaussianProcess'
+                        print('>>> Model: GaussianProcess')
+                        result = GPTrainApp(dset, split_strategy).main()
+                    elif args.which == 3:
+                        model_name = 'DecisionTree'
+                        print('>>> Model: DecisionTree')
+                        result = DTTrainApp(dset, split_strategy).main()
+                    elif args.which == 4:
+                        model_name = 'RandomForest'
+                        print('>>> Model: RandomForest')
+                        result = RFTrainApp(dset, split_strategy).main()
+                    elif args.which == 5:
+                        model_name = 'AdaBoost'
+                        print('>>> Model: AdaBoost')
+                        result = ABTrainApp(dset, split_strategy).main()
+                    elif args.which == 6:
+                        model_name = 'QuadraticDiscriminantAnalysis'
+                        print('>>> Model: QuadraticDiscriminantAnalysis')
+                        result = QDATrainApp(dset, split_strategy).main()
+                    
+                    exp_result[subject] = result
+            elif args.exp == 'subj_indep':
+                data_paths = [data_dir + '/' + subj + '_data_' + feature + '_' + str(args.slice_length) + 's.npy' for subj in subjects]
+                label_paths = [data_dir + '/' + subj + '_label_' + str(args.slice_length) + 's.npy' for subj in subjects]
+                dset = ArtDataset(data_paths, label_paths, freq_band=freq)
 
-                test_fold = np.empty(len(subjects)*nsamples, dtype=np.int8)
-                test_fold.fill(-1)
-                test_fold[subj_idx*nsamples: (subj_idx+1)*nsamples] = 0
-                split_strategy = PredefinedSplit(test_fold)
-                
-                if args.which == 0:
-                    model_name = 'SVM'
-                    print('>>> Model: SVM')
-                    result = SVMTrainApp(dset, split_strategy).main()
-                elif args.which == 1:
-                    model_name = 'GNN'
-                    print('>>> Model: GNN')
-                    result = GNNTrainApp(dset, split_strategy).main()
-                elif args.which == 2:
-                    model_name = 'KNN'
-                    print('>>> Model: KNN')
-                    result = KNNTrainApp(dset, split_strategy).main()
-                elif args.which == 3:
-                    model_name = 'GaussianProcess'
-                    print('>>> Model: GaussianProcess')
-                    result = GPTrainApp(dset, split_strategy).main()
-                elif args.which == 4:
-                    model_name = 'DecisionTree'
-                    print('>>> Model: DecisionTree')
-                    result = DTTrainApp(dset, split_strategy).main()
-                elif args.which == 5:
-                    model_name = 'RandomForest'
-                    print('>>> Model: RandomForest')
-                    result = RFTrainApp(dset, split_strategy).main()
-                elif args.which == 6:
-                    model_name = 'AdaBoost'
-                    print('>>> Model: AdaBoost')
-                    result = ABTrainApp(dset, split_strategy).main()
-                elif args.which == 7:
-                    model_name = 'QuadraticDiscriminantAnalysis'
-                    print('>>> Model: QuadraticDiscriminantAnalysis')
-                    result = QDATrainApp(dset, split_strategy).main()
-                elif args.which == 8:
-                    model_name = 'DANN'
-                    print('>>> Model: DANN')
-                    result = DANNTrainApp(dset, split_strategy).main()
-                
-                exp_result[subject] = result
+                for si in range(10) :
+                    subject = subjects[si]
+                    ncases = ncases_each_subj[si]
 
-        print('Result:')
-        pprint(exp_result)
+                    print('#'*10, 'Target on ', subject)
+                    subj_idx = subjects.index(subject)
 
-        subj_train_accs = np.array([round(exp_result[subj]['train']['accuracy'], 4) for subj in subjects])
-        subj_train_f1s = np.array([round(exp_result[subj]['train']['f1_macro'], 4) for subj in subjects])
-        subj_test_accs = np.array([round(exp_result[subj]['test']['accuracy'], 4) for subj in subjects])
-        subj_test_f1s = np.array([round(exp_result[subj]['test']['f1_macro'], 4) for subj in subjects])
+                    test_fold = np.empty(sum(ncases_each_subj) * nslices_per_img, dtype=np.int8)
+                    test_fold.fill(-1)
+                    test_fold[sum(ncases_each_subj[:subj_idx])*nslices_per_img : sum(ncases_each_subj[:subj_idx+1])*nslices_per_img] = 0
+                    split_strategy = PredefinedSplit(test_fold)
+                    
+                    if args.which == 0:
+                        model_name = 'SVM'
+                        print('>>> Model: SVM')
+                        result = SVMTrainApp(dset, split_strategy).main()
+                    elif args.which == 1:
+                        model_name = 'KNN'
+                        print('>>> Model: KNN')
+                        result = KNNTrainApp(dset, split_strategy).main()
+                    elif args.which == 2:
+                        model_name = 'GaussianProcess'
+                        print('>>> Model: GaussianProcess')
+                        result = GPTrainApp(dset, split_strategy).main()
+                    elif args.which == 3:
+                        model_name = 'DecisionTree'
+                        print('>>> Model: DecisionTree')
+                        result = DTTrainApp(dset, split_strategy).main()
+                    elif args.which == 4:
+                        model_name = 'RandomForest'
+                        print('>>> Model: RandomForest')
+                        result = RFTrainApp(dset, split_strategy).main()
+                    elif args.which == 5:
+                        model_name = 'AdaBoost'
+                        print('>>> Model: AdaBoost')
+                        result = ABTrainApp(dset, split_strategy).main()
+                    elif args.which == 6:
+                        model_name = 'QuadraticDiscriminantAnalysis'
+                        print('>>> Model: QuadraticDiscriminantAnalysis')
+                        result = QDATrainApp(dset, split_strategy).main()
+                    elif args.which == 7:
+                        model_name = 'DANN'
+                        print('>>> Model: DANN')
+                        result = DANNTrainApp(dset, split_strategy).main()
+                    
+                    exp_result[subject] = result
 
-        plt.style.use('seaborn')
-        x = np.arange(0, (len(subjects)-1)*2.5+1, 2.5)  # the label locations
-        width = 1.0  # the width of the bars
-        fig, ax = plt.subplots(figsize=(14.8, 7.8))
-        acc_train_rect = ax.bar(x - width/2, subj_train_accs, width, label='Train/Acc', fill=False, ls='--')
-        acc_test_rect = ax.bar(x - width/2, subj_test_accs, width, label='Test/Acc')
-        f1_train_rect = ax.bar(x + width/2, subj_train_f1s, width, label='Train/F1', fill=False, ls='--')
-        f1_test_rect = ax.bar(x + width/2, subj_test_f1s, width, label='Test/F1')
-        # Add some text for labels, title and custom x-axis tick labels, etc.
-        ax.set_xlabel('Subjects')
-        ax.set_title('{}_{}_{}_{}'.format(args.exp, feature, freq, model_name), pad=36)
-        ax.set_xticks(x)
-        ax.set_xticklabels(subjects)
-        ax.set_ylim(0.0, 1.0)
-        box = ax.get_position()
-        ax.set_position([box.x0, box.y0, box.width * 0.8, box.height])
-        ax.legend([acc_train_rect, acc_test_rect, f1_test_rect], ['Train', 'Test/Acc.', 'Test/F1.'], loc='center left', bbox_to_anchor=(1, 0.5))
-        ax.bar_label(acc_train_rect, padding=3)
-        ax.bar_label(acc_test_rect, padding=3)
-        ax.bar_label(f1_train_rect, padding=3)
-        ax.bar_label(f1_test_rect, padding=3)
-        fig.savefig('./figs20211118/All/{}_{}_{}s_{}_{}.png'.format(args.exp, feature, args.slice_length, freq, model_name))
-        plt.close('all')
+            print('Result:')
+            pprint(exp_result)
 
-        print('====Train:\nacc: {:.4f}/{:.4f}\nf1: {:.4f}/{:.4f}'.format(subj_train_accs.mean(), subj_train_accs.std(), subj_train_f1s.mean(), subj_train_f1s.std()))
-        print('====Test:\nacc: {:.4f}/{:.4f}\nf1: {:.4f}/{:.4f}'.format(subj_test_accs.mean(), subj_test_accs.std(), subj_test_f1s.mean(), subj_test_f1s.std()))
+            subj_train_accs = np.array([round(exp_result[subj]['train']['accuracy'], 4) for subj in subjects])
+            subj_train_f1s = np.array([round(exp_result[subj]['train']['f1_macro'], 4) for subj in subjects])
+            subj_test_accs = np.array([round(exp_result[subj]['test']['accuracy'], 4) for subj in subjects])
+            subj_test_f1s = np.array([round(exp_result[subj]['test']['f1_macro'], 4) for subj in subjects])
 
-        # plt.style.use('default')
-        # dta = np.array([pic_results[sj] for sj in subjects])
-        # imgs = list(range(90))
-        # fig2, ax2 = plt.subplots(figsize=(30.8, 4.8))
-        # im, cbar = heatmap(dta, subjects, imgs, ax=ax2, cmap="YlGn", cbarlabel="acc")
-        # # texts = annotate_heatmap(im, valfmt="{x:.4f}")
-        # fig2.savefig('./figs_cao/{}_{}_{}_{}_picresult.png'.format(args.exp, feature, freq, model_name))
-        # plt.close('all')
+            plt.style.use('seaborn')
+            x = np.arange(0, (len(subjects)-1)*2.5+1, 2.5)  # the label locations
+            width = 1.0  # the width of the bars
+            fig, ax = plt.subplots(figsize=(14.8, 7.8))
+            acc_train_rect = ax.bar(x - width/2, subj_train_accs, width, label='Train/Acc', fill=False, ls='--')
+            acc_test_rect = ax.bar(x - width/2, subj_test_accs, width, label='Test/Acc')
+            f1_train_rect = ax.bar(x + width/2, subj_train_f1s, width, label='Train/F1', fill=False, ls='--')
+            f1_test_rect = ax.bar(x + width/2, subj_test_f1s, width, label='Test/F1')
+            # Add some text for labels, title and custom x-axis tick labels, etc.
+            ax.set_xlabel('Subjects')
+            ax.set_title('{}_{}_{}_{}'.format(args.exp, feature, freq, model_name), pad=36)
+            ax.set_xticks(x)
+            ax.set_xticklabels(subjects)
+            ax.set_ylim(0.0, 1.0)
+            box = ax.get_position()
+            ax.set_position([box.x0, box.y0, box.width * 0.8, box.height])
+            ax.legend([acc_train_rect, acc_test_rect, f1_test_rect], ['Train', 'Test/Acc.', 'Test/F1.'], loc='center left', bbox_to_anchor=(1, 0.5))
+            ax.bar_label(acc_train_rect, padding=3)
+            ax.bar_label(acc_test_rect, padding=3)
+            ax.bar_label(f1_train_rect, padding=3)
+            ax.bar_label(f1_test_rect, padding=3)
+            fig.savefig('./embc_figs_2cat/{}_{}_{}s_{}_{}.png'.format(args.exp, feature, args.slice_length, freq, model_name))
+            plt.close('all')
+
+            print('====Train:\nacc: {:.4f}/{:.4f}\nf1: {:.4f}/{:.4f}'.format(subj_train_accs.mean(), subj_train_accs.std(), subj_train_f1s.mean(), subj_train_f1s.std()))
+            print('====Test:\nacc: {:.4f}/{:.4f}\nf1: {:.4f}/{:.4f}'.format(subj_test_accs.mean(), subj_test_accs.std(), subj_test_f1s.mean(), subj_test_f1s.std()))
+
+            # plt.style.use('default')
+            # dta = np.array([pic_results[sj] for sj in subjects])
+            # imgs = list(range(90))
+            # fig2, ax2 = plt.subplots(figsize=(30.8, 4.8))
+            # im, cbar = heatmap(dta, subjects, imgs, ax=ax2, cmap="YlGn", cbarlabel="acc")
+            # # texts = annotate_heatmap(im, valfmt="{x:.4f}")
+            # fig2.savefig('./figs_cao/{}_{}_{}_{}_picresult.png'.format(args.exp, feature, freq, model_name))
+            # plt.close('all')
+
