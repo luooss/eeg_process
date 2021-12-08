@@ -1,0 +1,12 @@
+pics/
+artwork_exp_record/
+example_pics/
+npydata/
+__pycache__/
+runs/
+figs*/
+asgc/
+dimreduce/
+embc_figs*/
+icons/
+visualization/
