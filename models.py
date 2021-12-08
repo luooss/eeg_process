@@ -16,8 +16,8 @@ def add_remaining_self_loops(edge_index, edge_weight=None, fill_value=1, num_nod
 
     mask = row != col
     # select self loop edges
-    inv_mask = 1 - mask
-    loop_weight = torch.full((num_nodes, ), fill_value, dtype=None if edge_weight is None else edge_weight.dtype, device=edge_index.device)
+    inv_mask = mask.logical_not()
+    loop_weight = torch.full((num_nodes, ), fill_value, dtype=None if edge_weight is None else edge_weight.dtype, device=edge_weight.device)
 
     if edge_weight is not None:
         assert edge_weight.numel() == edge_index.size(1)
@@ -26,8 +26,8 @@ def add_remaining_self_loops(edge_index, edge_weight=None, fill_value=1, num_nod
             loop_weight[row[inv_mask]] = remaining_edge_weight
         edge_weight = torch.cat([edge_weight[mask], loop_weight], dim=0)
 
-    loop_index = torch.arange(0, num_nodes, dtype=row.dtype, device=row.device)
-    loop_index = loop_index.unsqueeze(0).repeat(2, 1)
+    loop_index = torch.arange(0, num_nodes, dtype=row.dtype)
+    loop_index = loop_index.unsqueeze(0).repeat(2, 1).to(edge_index.device)
     edge_index = torch.cat([edge_index[:, mask], loop_index], dim=1)
 
     return edge_index, edge_weight
@@ -39,13 +39,32 @@ class NewSGConv(SGConv):
 
     # allow negative edge weights
     @staticmethod
-    def norm(edge_index, num_nodes, edge_weight, improved=False, dtype=None):
+    def norm2(edge_index, num_nodes, edge_weight, improved=False, dtype=None):
         if edge_weight is None:
             edge_weight = torch.ones((edge_index.size(1), ), dtype=dtype, device=edge_index.device)
 
         fill_value = 1 if not improved else 2
         edge_index, edge_weight = add_remaining_self_loops(edge_index, edge_weight, fill_value, num_nodes)
         row, col = edge_index
+        deg = scatter_add(torch.abs(edge_weight), row, dim=0, dim_size=num_nodes)
+        deg_inv_sqrt = deg.pow(-0.5)
+        deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+
+        return edge_index, deg_inv_sqrt[row] * edge_weight * deg_inv_sqrt[col]
+    
+    @staticmethod
+    def norm(edge_index, num_nodes, edge_weight, improved=False, dtype=None):
+        # num_nodes = x.size(0)
+        # if edge_weight is None:
+        #     edge_weight = torch.ones((edge_index.size(1),),
+        #                              dtype=dtype,
+        #                              device=edge_index.device)
+
+        # fill_value = 1 if not improved else 2
+        # edge_index, edge_weight = add_remaining_self_loops(
+        #     edge_index, edge_weight, fill_value, num_nodes)
+        row, col = edge_index
+        # scatter_add_ on zeros
         deg = scatter_add(torch.abs(edge_weight), row, dim=0, dim_size=num_nodes)
         deg_inv_sqrt = deg.pow(-0.5)
         deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
@@ -65,7 +84,7 @@ class NewSGConv(SGConv):
                 x = self.propagate(edge_index, x=x, norm=norm)
             self.cached_result = x
 
-        return self.lin(self.cached_result)
+        return self.cached_result, self.lin(self.cached_result)
 
     def message(self, x_j, norm):
         # x_j: (batch_size*num_nodes*num_nodes, num_features)
@@ -151,6 +170,7 @@ class GradientReversalFuntion(Function):
         dx = -lambda_ * grads
         return dx, None
 
+
 class GradientReversalLayer(nn.Module):
     def __init__(self, lambda_=1):
         super().__init__()
@@ -158,6 +178,7 @@ class GradientReversalLayer(nn.Module):
 
     def forward(self, x):
         return GradientReversalFuntion.apply(x, self.lambda_)
+
 
 class SGCFeatureExtractor(nn.Module):
     def __init__(self, num_nodes, learn_edge_weight, edge_weight, num_features, num_hidden, K):
@@ -174,12 +195,16 @@ class SGCFeatureExtractor(nn.Module):
         """
         super(SGCFeatureExtractor, self).__init__()
         self.num_nodes = num_nodes
+        self.num_hidden = num_hidden
+        self.num_features = num_features
         self.xs, self.ys = torch.tril_indices(self.num_nodes, self.num_nodes, offset=0)
         # num_edges = num_nodes * num_nodes
         # num_edgeweights_tolearn = (num_nodes * num_nodes + num_nodes) / 2
         # torch.Size([num_edgeweights_tolearn])
         edge_weight = edge_weight.reshape(self.num_nodes, self.num_nodes)[self.xs, self.ys] # strict lower triangular values
         self.edge_weight = nn.Parameter(edge_weight, requires_grad=learn_edge_weight)
+        self.bn1 = nn.BatchNorm1d(num_features)
+        self.bn2 = nn.BatchNorm1d(num_hidden)
         self.conv1 = NewSGConv(num_features=num_features, num_classes=num_hidden, K=K)
 
     def forward(self, data):
@@ -194,34 +219,56 @@ class SGCFeatureExtractor(nn.Module):
         edge_weight = edge_weight + edge_weight.transpose(1,0) - torch.diag(edge_weight.diagonal()) # copy values from lower tri to upper tri
         # torch.Size([num_graphs*num_nodes*num_nodes])
         edge_weight = edge_weight.reshape(-1).repeat(batch_size)
-        x = F.relu(self.conv1(x, edge_index, edge_weight))
-        x = global_add_pool(x, data.batch, size=batch_size)
-        return x
+        x = self.bn1(x)
+        x_smooth, xz = self.conv1(x, edge_index, edge_weight)
+        xz = F.leaky_relu(self.bn2(xz))
+        # self-attention, concate pooling
+        xz = xz.view(batch_size, self.num_nodes, self.num_hidden)
+        xz_t = torch.transpose(xz, 1, 2)
+        attention = torch.softmax(torch.bmm(xz, xz_t), dim=2)
+        x_attention = torch.bmm(attention, x_smooth.view(batch_size, self.num_nodes, self.num_features))
+        # (batch_size, num_nodes*num_features)
+        x_attention = x_attention.view(batch_size, -1)
+        return x_attention
 
 
 class LabelClassifier(nn.Module):
-    def __init__(self, num_hidden, dropout):
+    def __init__(self, input_dim, dropout):
         super(LabelClassifier, self).__init__()
         # if you want to apply additional operations in between layers, wirte them separately
         # or use nn.Sequential()
+        self.fc1 = nn.Linear(input_dim, input_dim//2)
+        self.bn = nn.BatchNorm1d(input_dim//2)
         self.dropout = dropout
-        self.fc = nn.Linear(num_hidden, 3)
+        self.fc2 = nn.Linear(input_dim//2, 3)
         self.lsm = nn.LogSoftmax(dim=1)
 
     def forward(self, x):
-        a = F.dropout(x, p=self.dropout, training=self.training)
-        a = self.lsm(self.fc(a))
-        return a
+        x = self.fc1(x)
+        x = F.leaky_relu(self.bn(x))
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.fc2(x)
+        x = self.lsm(x)
+        return x
 
 
 class DomainClassifier(nn.Module):
-    def __init__(self, num_hidden, lambda_):
+    def __init__(self, input_dim, dropout, lambda_):
         super(DomainClassifier, self).__init__()
+
         self.gradrev = GradientReversalLayer(lambda_=lambda_)
-        self.fc = nn.Linear(num_hidden, 2)
+
+        self.fc1 = nn.Linear(input_dim, input_dim//2)
+        self.bn = nn.BatchNorm1d(input_dim//2)
+        self.dropout = dropout
+        self.fc2 = nn.Linear(input_dim//2, 2)
         self.lsm = nn.LogSoftmax(dim=1)
 
     def forward(self, x):
-        a = self.gradrev(x)
-        a = self.lsm(self.fc(a))
-        return a
+        x = self.gradrev(x)
+        x = self.fc1(x)
+        x = F.leaky_relu(self.bn(x))
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.fc2(x)
+        x = self.lsm(x)
+        return x

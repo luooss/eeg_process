@@ -5,17 +5,18 @@ from torch.utils.data import Dataset
 import scipy.io as sio
 import numpy as np
 from torch_geometric.data import InMemoryDataset, Data
+from imblearn.over_sampling import SMOTE
 
 
-freq_bands = ['all', 'delta', 'theta', 'alpha', 'beta', 'gamma']
-data_path_temp = r'/mnt/xlancefs/home/gwl20/data20211118/data/{}s/{}_data_{}_{}s.npy'
-label_path_temp = r'/mnt/xlancefs/home/gwl20/data20211118/data/{}s/{}_label_{}s.npy'
+freq_bands = ['delta', 'theta', 'alpha', 'beta', 'gamma']
+data_path_temp = r'/mnt/xlancefs/home/gwl20/code/data/features/{}s/{}_data_{}_{}s.npy'
+label_path_temp = r'/mnt/xlancefs/home/gwl20/code/data/features/{}s/{}_label_{}s.npy'
 
-img_order = np.load(r'img_order.npy', allow_pickle=True).item()
+img_order = np.load(r'/mnt/xlancefs/home/gwl20/code/data/img_order.npy', allow_pickle=True).item()
 
 # train test set into separate Datasets
 class ArtGraphDataset(InMemoryDataset):
-    def __init__(self, slice_length, feature, freq_band, subjects, exclude_images, root, transform=None, pre_transform=None):
+    def __init__(self, slice_length, feature, freq_band, subjects, exclude_images, root, oversample=False, transform=None, pre_transform=None):
         """[summary]
 
         Args:
@@ -23,18 +24,20 @@ class ArtGraphDataset(InMemoryDataset):
             feature (str): psd, de
             freq_band (str): 
             subjects (list of str): 
-            exclude_images (dict): 
+            exclude_images (dict):
             root (str): 
             transform ([type], optional): [description]. Defaults to None.
             pre_transform ([type], optional): [description]. Defaults to None.
         """
-        super(ArtGraphDataset, self).__init__(root, transform, pre_transform)
         self.slice_length = slice_length
         self.feature = feature
-        self.idx_band = freq_bands.index(freq_band)
-        assert len(subjects) == len(exclude_images)
+        if freq_band == 'all':
+            self.idx_band = -1
+        else:
+            self.idx_band = freq_bands.index(freq_band)
         self.subjects = subjects
         self.exclude_images = exclude_images
+        super(ArtGraphDataset, self).__init__(root, transform, pre_transform)
         self.data, self.slices = torch.load(self.processed_paths[0])
 
     @property
@@ -64,8 +67,10 @@ class ArtGraphDataset(InMemoryDataset):
                 mask[idx*ncases_per_img : (idx+1)*ncases_per_img] = 0
             mask = mask == 1
             # (ncases, 62, 5, nseconds)
-            data = np.load(data_path)[self.idx_band][mask]
+            data = np.load(data_path)[0][mask]
             label = np.load(label_path)[mask]
+            if self.idx_band != -1:
+                data = data[:, :, self.idx_band, :]
             ncases = data.shape[0]
             for i in range(ncases):
                 # simply flatten
@@ -89,30 +94,46 @@ class ArtGraphDataset(InMemoryDataset):
 
 
 class ArtDataset(Dataset):
-    def __init__(self, data_paths, label_paths, freq_band='all'):
-        """Initialize dataset.
-
-        Args:
-            data_paths (list of str): Combine multiple data sources
-            label_paths (list of str): Combine labels
-            freq_band (str): 'all', 'delta', 'theta', 'alpha', 'beta', 'gamma'
-        """
+    def __init__(self, slice_length, feature, freq_band, subjects, exclude_images, oversample=False):
         super().__init__()
-        bands = ['all', 'delta', 'theta', 'alpha', 'beta', 'gamma']
-        idx_band = bands.index(freq_band)
+        if freq_band == 'all':
+            idx_band = -1
+        else:
+            idx_band = freq_bands.index(freq_band)
 
         self.data = []
         self.label = []
         
-        for data_path, label_path in zip(data_paths, label_paths):
-            data_ = np.load(data_path)[idx_band]
-            label_ = np.load(label_path)
+        for subject in subjects:
+            data_path = data_path_temp.format(slice_length, subject, feature, slice_length)
+            label_path = label_path_temp.format(slice_length, subject, slice_length)
+            ncases_per_img = int(30 / slice_length)
+            image_order = img_order[subject]
+            excl_imgs = exclude_images[subject]
+            mask = np.ones((60*ncases_per_img, ), dtype=int)
+            for img in excl_imgs:
+                idx = image_order.index(img)
+                mask[idx*ncases_per_img : (idx+1)*ncases_per_img] = 0
+            mask = mask == 1
+            # (ncases, 62, 5, nseconds)
+            data_ = np.load(data_path)[0][mask]
+            label_ = np.load(label_path)[mask]
+            if idx_band != -1:
+                data_ = data_[:, :, idx_band, :]
             
+            ncases = data_.shape[0]
+            data_ = np.reshape(data_, (ncases, -1))
             self.data.append(data_)
             self.label.append(label_)
         
-        self.data = torch.from_numpy(np.concatenate(self.data, axis=0)).to(torch.float)
-        self.label = torch.from_numpy(np.concatenate(self.label, axis=0)).to(torch.long)
+        self.data = np.concatenate(self.data, axis=0)
+        self.label = np.concatenate(self.label, axis=0)
+        if oversample:
+            sm = SMOTE(n_jobs=16)
+            self.data, self.label = sm.fit_resample(self.data, self.label)
+
+        self.data = torch.from_numpy(self.data).to(torch.float)
+        self.label = torch.from_numpy(self.label).to(torch.long)
     
     def __len__(self):
         return self.data.shape[0]

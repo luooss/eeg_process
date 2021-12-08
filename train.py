@@ -1,14 +1,10 @@
 import os
 import argparse
 import time
-import random
-import math
 from pprint import pprint
-from numpy.lib.function_base import average
 import numpy as np
-from scipy.stats.stats import RepeatedResults
-from torch._C import dtype
-from torch.functional import split
+import datetime
+from pprint import pprint
 
 from tqdm import tqdm
 
@@ -22,12 +18,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as opt
 
-from torch_geometric.data import DataLoader
+from torch_geometric.loader import DataListLoader
+from torch_geometric.nn import DataParallel
 
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.neural_network import MLPClassifier
-from sklearn.naive_bayes import GaussianNB
 from sklearn.gaussian_process import GaussianProcessClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier
@@ -62,28 +57,45 @@ parser.add_argument('--feature',
                     help='psd, de',
                     default='de',
                     type=str)
+parser.add_argument('--freqbands',
+                    help='Freq bands',
+                    default="['all', 'delta', 'theta', 'alpha', 'beta', 'gamma']",
+                    type=str)
+
+
+# GNN hyper params
+# (5, 1), (5, 3), (5, 5)
 parser.add_argument('--maxepochs',
                     help='Maximum training epochs',
                     default=1000,
                     type=int)
 parser.add_argument('--lr',
                     help='Learning rate',
-                    default='np.logspace(-5, -1, 5)',
+                    default='np.logspace(-4, -1, 4)',
                     type=str)
-
-# GNN hyper params
-# (5, 1), (5, 3), (5, 5)
+parser.add_argument('--weight_decay',
+                    help='Weight decay for optimizer',
+                    default='1e-5',
+                    type=float)
+parser.add_argument('--label_type',
+                    help='hard or soft',
+                    default='soft',
+                    type=str)
 parser.add_argument('--num_hidden',
                     help='The dimensionality of the learned embedding for nodes',
                     default='[3, 5, 8, 13, 15, 25]',
                     type=str)
 parser.add_argument('--K',
                     help='Number of layers',
-                    default='[3, 5, 8]',
+                    default='[5]',
                     type=str)
 parser.add_argument('--dropout',
                     help='Dropout',
-                    default='[0.5, 0.7]',
+                    default='[0.7]',
+                    type=str)
+parser.add_argument('--epsilon',
+                    help='Soft label epsilon',
+                    default='np.logspace(-2, -1, 2)',
                     type=str)
 parser.add_argument('--lambda_',
                     help='Coefficient of inverse gradient',
@@ -94,22 +106,24 @@ parser.add_argument('--alpha',
                     default='np.logspace(-4, 0, 5)',
                     type=str)
 
-# LSTM hyper-parameters
-parser.add_argument('--hidden_size',
-                    help='Hidden size of the LSTM, enter multiple values like [32,64,128] starts hyperparameter test',
-                    default='[128]',
-                    type=str)
-parser.add_argument('--num_layers',
-                    help='Number of LSTM layers',
-                    default='[3]',
-                    type=str)
-
 
 args = parser.parse_args()
 
-subjects = ['zhuyangxiangru', 'zhaosijia', 'feicheng', 'xiajingtao', 'wangyanchu', 'zhangliuxin', 'panshuyi', 'hexingtao', 'chenbingliang', 'chengyuting']
+# subjects = ['zuoyaxi', 'zhangliuxin', 'zhaosijia', 'zhuyangxiangru', 'pujizhou', 'chenbingliang', 'mengdong', 'zhengxucen',
+#             'hexingtao', 'wanghuiling', 'panshuyi', 'wangsifan', 'zhaochangquan', 'wuxiangyu', 'xiajingtao', 'liujiaxin',
+#             'wangyanchu', 'liyizhou', 'weifenfen', 'chengyuting', 'chenjiajing', 'matianfang', 'liuledian', 'zuogangao', 'feicheng', 'xuyutong']
+subjects = ['zuoyaxi', 'zhangliuxin', 'zhaosijia', 'zhuyangxiangru', 'pujizhou', 'chenbingliang', 'zhengxucen',
+            'hexingtao', 'wanghuiling', 'panshuyi', 'zhaochangquan', 'wangyanchu', 'liyizhou', 'chengyuting',
+            'chenjiajing', 'matianfang', 'liuledian', 'zuogangao', 'feicheng', 'xuyutong']
 phases = ['train', 'test']
 indicators = ['accuracy', 'f1_macro']
+data_dir = r'/mnt/xlancefs/home/gwl20/code/data/features/'
+graph_data_root_dir = r'/mnt/xlancefs/home/gwl20/code/data/features/graph_data/'
+exclude_imgs = np.load(r'/mnt/xlancefs/home/gwl20/code/data/exlcude_img_arousal_3.npy', allow_pickle=True).item()
+nimgs_each_subject = []
+for subject in subjects:
+    nimgs_each_subject.append(60 - len(exclude_imgs[subject]))
+
 
 class SVMTrainApp:
     def __init__(self, dset, split_strategy):
@@ -119,22 +133,20 @@ class SVMTrainApp:
             dset (torch dataset): the data to be fitted.
             split_strategy (sklearn split generator): controls the type of experiment.
         """
-        self.nsamples = dset.data.size()[0]
-        self.data = dset.data.numpy().reshape(self.nsamples, -1)
+        self.data = dset.data.numpy()
         self.label = dset.label.numpy()
         self.split_strategy = split_strategy
 
-        # hyperparams = [{'kernel': ['rbf'], 'C': np.logspace(-9, 4, 14), 'gamma': np.logspace(-6, -2, 5)}]
-        # hyperparams = [{'kernel': ['linear'], 'C': np.logspace(-9, 5, 8)}]
-        hyperparams = [{'kernel': ['linear'], 'C': [1e-5, 1e-2, 1, 10]}]
+        hyperparams = [{'kernel': ['rbf'], 'C': np.logspace(-4, 0, 5), 'gamma': ['scale', 'auto']},
+                       {'kernel': ['linear'], 'C': np.logspace(-4, 0, 5)}]
         # refit: after hp is determined, learn the best lp over the whole dataset, this is for prediction
         self.model = GridSearchCV(SVC(),
                                   param_grid=hyperparams,
                                   scoring=['accuracy', 'f1_macro'],
-                                  n_jobs=-1,
+                                  n_jobs=16,
                                   refit='f1_macro',
                                   cv=self.split_strategy,
-                                  verbose=1,
+                                  verbose=2,
                                   return_train_score=True)
     
     def main(self):
@@ -191,11 +203,12 @@ class GNNDomainAdaptationTrainApp:
     
     def get_runs(self):
         params = OrderedDict(lr = eval(args.lr),
-                                num_hidden = eval(args.num_hidden),
-                                K = eval(args.K),
-                                dropout=eval(args.dropout),
-                                lambda_ = eval(args.lambda_),
-                                alpha = eval(args.alpha))
+                             num_hidden = eval(args.num_hidden),
+                             K = eval(args.K),
+                             dropout=eval(args.dropout),
+                             lambda_ = eval(args.lambda_),
+                             alpha = eval(args.alpha),
+                             epsilon = eval(args.epsilon))
         
         Run = namedtuple('Run', params.keys())
         runs = []
@@ -204,30 +217,58 @@ class GNNDomainAdaptationTrainApp:
 
         return runs
     
-    def getInitialEdgeWeightMatrix():
-        pass
+    def getInitialEdgeWeightMatrix(self):
+        adj = np.zeros((62, 62))
+        xs, ys = np.tril_indices(62, -1)
+        adj[xs, ys] = np.random.uniform(-1, 1, xs.shape[0])
+        adj = adj + adj.T + np.identity(len(adj))
+        return torch.tensor(adj, dtype=torch.float)
 
     def getModel(self, num_hidden, K, dropout, lambda_):
         edge_weight = self.getInitialEdgeWeightMatrix()
         sgc = SGCFeatureExtractor(num_nodes=62,
                                   learn_edge_weight=True,
                                   edge_weight=edge_weight,
-                                  num_features=self.dset.num_node_features,
+                                  num_features=self.train_dset.num_node_features,
                                   num_hidden=num_hidden,
                                   K=K)
-        label_classifier = LabelClassifier(num_hidden, dropout)
-        domain_classifier = DomainClassifier(num_hidden, lambda_)
+        label_classifier = LabelClassifier(62*self.train_dset.num_node_features, dropout)
+        domain_classifier = DomainClassifier(62*self.train_dset.num_node_features, dropout, lambda_)
         
         if self.use_cuda:
             print('Using cuda. Total {:d} devices.'.format(torch.cuda.device_count()))
             if torch.cuda.device_count() > 1:
-                sgc = nn.DataParallel(sgc)
+                sgc = DataParallel(sgc)
                 label_classifier = nn.DataParallel(label_classifier)
                 domain_classifier = nn.DataParallel(domain_classifier)
         else:
             print('Using cpu.')
 
         return sgc.to(self.device), label_classifier.to(self.device), domain_classifier.to(self.device)
+
+    def getSoftLabel(self, y, epsilon):
+        """[summary]
+
+        Args:
+            y : (batch_size, )
+
+        Returns:
+            soft_y : (batch_size, 3)
+        """
+        batch_size = y.size(dim=0)
+        soft_y = np.zeros((batch_size, 3))
+        for i in range(batch_size):
+            if y[i] == 0:
+                # negative
+                soft_y[i] = [1-2*epsilon/3, 2*epsilon/3, 0]
+            elif y[i] == 1:
+                # neutral
+                soft_y[i] = [epsilon/3, 1-2*epsilon/3, epsilon/3]
+            elif y[i] == 2:
+                # positive
+                soft_y[i] = [0, 2*epsilon/3, 1-2*epsilon/3]
+        
+        return torch.tensor(soft_y, dtype=torch.float, device=self.device)
 
     def main(self):
         runs = self.get_runs()
@@ -238,90 +279,95 @@ class GNNDomainAdaptationTrainApp:
                 result[run][ph] = {}
 
         for run in runs:
-            comment = ' RGNN lr={} num_hidden={} K={} dropout={} lambda_={} alpha={}'.format(run.lr, run.num_hidden, run.K, run.dropout, run.lambda_, run.alpha)
+            comment = ' RGNN_DA lr={} num_hidden={} K={} dropout={} lambda_={} alpha={} epsilon={}'.format(run.lr, run.num_hidden, run.K, run.dropout, run.lambda_, run.alpha, run.epsilon)
             
-            dann_writer = SummaryWriter(comment=comment)
+            # dann_writer = SummaryWriter(comment=comment)
 
             print('Hyper Parameter test: ' + comment)
             start_outer = time.time()
 
-            train_dloader = DataLoader(self.train_dset, batch_size=8, shuffle=True, drop_last=True)
-            test_dloader = DataLoader(self.test_dset, batch_size=8, shuffle=True)
+            train_dloader = DataListLoader(self.train_dset, batch_size=16, shuffle=True, drop_last=True)
+            test_dloader = DataListLoader(self.test_dset, batch_size=16, shuffle=True, drop_last=True)
 
             sgc, label_classifier, domain_classifier = self.getModel(run.num_hidden, run.K, run.dropout, run.lambda_)
 
-            optim = torch.optim.Adam(list(sgc.parameters())+list(label_classifier.parameters())+list(domain_classifier.parameters()), lr=run.lr, weight_decay=1e-5)
+            optim = torch.optim.Adam(list(sgc.parameters())+list(label_classifier.parameters())+list(domain_classifier.parameters()), lr=run.lr, weight_decay=args.weight_decay)
             
+            sgc.train()
+            label_classifier.train()
+            domain_classifier.train()
             for epoch in tqdm(range(1, self.maxepochs+1)):
                 loss, label_loss, domain_loss = 0, 0, 0
                 label_pred_accuracy, domain_pred_accuracy = 0, 0
 
                 batches = zip(train_dloader, test_dloader)
                 n_batches = min(len(train_dloader), len(test_dloader))
-                for train_graph_batch, test_graph_batch in tqdm(batches, leave=False, total=n_batches):
-                    train_graph_batch = train_graph_batch.to(self.device)
-                    test_graph_batch = test_graph_batch.to(self.device)
+                for train_graph_list, test_graph_list in tqdm(batches, leave=False, total=n_batches):
 
-                    train_domain_label = torch.zeros(8).to(torch.long).to(self.device)
-                    test_domain_label = torch.ones(8).to(torch.long).to(self.device)
+                    train_domain_label = torch.zeros(16).to(torch.long).to(self.device)
+                    test_domain_label = torch.ones(16).to(torch.long).to(self.device)
 
                     # (batch_size, num_hidden)
-                    train_sgc_output = sgc(train_graph_batch)
-                    test_sgc_output = sgc(test_graph_batch)
+                    train_sgc_output = sgc(train_graph_list)
+                    test_sgc_output = sgc(test_graph_list)
                     # (batch_size, 3)
                     train_labcl_output = label_classifier(train_sgc_output)
                     # (batch_size, 2)
                     train_domcl_output = domain_classifier(train_sgc_output)
                     test_domcl_output = domain_classifier(test_sgc_output)
-
-                    # for nn.xxx, need to declare and then use because it is class
-                    # for nn.functional.xxx, use directly
+                    
+                    y = torch.cat([data.y for data in train_graph_list]).to(train_labcl_output.device)
                     if self.label_type == 'hard':
-                        label_loss_b = F.nll_loss(train_labcl_output, train_graph_batch.y)
-                        emotion_loss += emotion_loss_b
-                        domain_loss_b = F.nll_loss(pred_domain, y_domain)
-                        domain_loss += domain_loss_b
-                        loss_b = emotion_loss_b + run.alpha * domain_loss_b
-                        loss += loss_b
+                        label_loss_b = F.nll_loss(train_labcl_output, y)
                     elif self.label_type == 'soft':
-                        y = self.getSoftLabel()
-                        label_loss_b = F.kl_div(train_labcl_output, y)
+                        soft_y = self.getSoftLabel(y, run.epsilon)
+                        label_loss_b = F.kl_div(train_labcl_output, soft_y)
+                    
+                    label_loss += label_loss_b
+                    domain_loss_b = F.nll_loss(train_domcl_output, train_domain_label) + F.nll_loss(test_domcl_output, test_domain_label)
+                    domain_loss += domain_loss_b
+                    loss_b = label_loss_b + run.alpha * domain_loss_b
+                    loss += loss_b
 
                     optim.zero_grad()
                     loss_b.backward()
                     optim.step()
 
-                    emotion_pred_accuracy += (pred_emotion.max(dim=1)[1] == y_emotion).float().mean().item()
-                    domain_pred_accuracy += (pred_domain.max(dim=1)[1] == y_domain).float().mean().item()
+                    label_pred_accuracy += (train_labcl_output.max(dim=1)[1] == y).float().mean().item()
+                    domain_pred_accuracy += ((train_domcl_output.max(dim=1)[1] == train_domain_label).float().mean().item() + (test_domcl_output.max(dim=1)[1] == test_domain_label).float().mean().item()) / 2
 
-                epa_mean = emotion_pred_accuracy / nbatches  # expected to increase
-                dpa_mean = domain_pred_accuracy / nbatches  # expected to approximate 50%
+                epa_mean = label_pred_accuracy / n_batches  # expected to increase
+                dpa_mean = domain_pred_accuracy / n_batches  # expected to approximate 50%
 
-                dann_writer.add_scalar('loss/total_loss', loss, epoch)
-                dann_writer.add_scalar('loss/emotion_loss', emotion_loss, epoch)
-                dann_writer.add_scalar('loss/domain_loss', domain_loss, epoch)
-                dann_writer.add_scalar('accuracy/emotion_pred_accuracy', epa_mean, epoch)
-                dann_writer.add_scalar('accuracy/domain_pred_accuracy', dpa_mean, epoch)
-                dann_writer.flush()
-                dann_writer.close()
+                # dann_writer.add_scalar('loss/total_loss', loss, epoch)
+                # dann_writer.add_scalar('loss/label_loss', label_loss, epoch)
+                # dann_writer.add_scalar('loss/domain_loss', domain_loss, epoch)
+                # dann_writer.add_scalar('accuracy/label_pred_accuracy', epa_mean, epoch)
+                # dann_writer.add_scalar('accuracy/domain_pred_accuracy', dpa_mean, epoch)
+                # dann_writer.flush()
+                # dann_writer.close()
 
-                if epoch == 1 or epoch % 100 == 0:
-                    tqdm.write('Epoch {:6d}: train_emotion_pred_accuracy {:.4f}, train_domain_pred_accuracy {:.4f}'.format(epoch, epa_mean, dpa_mean))
+                if epoch == 1 or epoch % 5 == 0:
+                    tqdm.write('Epoch {:6d}: train_label_pred_accuracy {:.4f}, train_domain_pred_accuracy {:.4f}, domain_loss {:.4f}, label_loss {:.4f}, loss {:.4f}'.format(epoch, epa_mean, dpa_mean, domain_loss, label_loss, loss))
+                # tqdm.write('Epoch {:6d}: train_label_pred_accuracy {:.4f}, train_domain_pred_accuracy {:.4f}, domain_loss {:.4f}, label_loss {:.4f}, loss {:.4f}'.format(epoch, epa_mean, dpa_mean, domain_loss, label_loss, loss))
             
-            validation_dloaders = [source_dloader, target_dloader]
+            sgc.eval()
+            label_classifier.eval()
+            domain_classifier.eval()
+            validation_dloaders = [train_dloader, test_dloader]
             # validation on train set, test set
             for ph, der in zip(phases, validation_dloaders):
                 with torch.no_grad():
                     y_true, y_pred = [], []
-                    for tx, ty_e in der:
-                        tx = tx.to(self.device, non_blocking=True)
-                        ty_e = ty_e.to(self.device, non_blocking=True)
-
-                        tpred_e = dann(tx)
-                        y_p = tpred_e.max(dim=1)[1].to(device='cpu').numpy()
-                        y_t = ty_e.to(device='cpu').numpy()
-                        y_true.append(y_t)
-                        y_pred.append(y_p)
+                    for graph_list in der:
+                        # (batch_size, num_hidden)
+                        sgc_output = sgc(graph_list)
+                        # (batch_size, 3)
+                        labcl_output = label_classifier(sgc_output)
+                        
+                        y = torch.cat([data.y for data in graph_list]).to(labcl_output.device)
+                        y_pred.append(torch.argmax(labcl_output, dim=1).detach().cpu().numpy())
+                        y_true.append(y.detach().cpu().numpy())
                     
                     y_true = np.concatenate(y_true, axis=0)
                     y_pred = np.concatenate(y_pred, axis=0)
@@ -340,7 +386,198 @@ class GNNDomainAdaptationTrainApp:
             if(result[run]['test']['f1_macro'] > result[best_run]['test']['f1_macro']):
                 best_run = run
         
-        print('Best hyper parameter: lr={} lambda_={} alpha={}'.format(run.lr, run.lambda_, run.alpha))
+        print('====== Best hyper parameter: lr={} num_hidden={} K={} dropout={} lambda_={} alpha={} epsilon={}'.format(best_run.lr, best_run.num_hidden, best_run.K, best_run.dropout, best_run.lambda_, best_run.alpha, best_run.epsilon))
+        return result[best_run]
+
+
+class GNNTrainApp:
+    def __init__(self, dset, split_strategy, label_type):
+        self.dset = dset
+        self.split_strategy = split_strategy
+        self.label_type = label_type
+        self.nworkers = os.cpu_count()
+        self.maxepochs = args.maxepochs
+
+        self.use_cuda = torch.cuda.is_available()
+        self.device = torch.device('cuda' if self.use_cuda else 'cpu')
+    
+    def get_runs(self):
+        params = OrderedDict(lr = eval(args.lr),
+                             num_hidden = eval(args.num_hidden),
+                             K = eval(args.K),
+                             dropout = eval(args.dropout),
+                             epsilon = eval(args.epsilon))
+        
+        Run = namedtuple('Run', params.keys())
+        runs = []
+        for v in product(*params.values()):
+            runs.append(Run(*v))
+
+        return runs
+    
+    def getInitialEdgeWeightMatrix(self):
+        adj = np.zeros((62, 62))
+        xs, ys = np.tril_indices(62, -1)
+        adj[xs, ys] = np.random.uniform(-1, 1, xs.shape[0])
+        adj = adj + adj.T + np.identity(len(adj))
+        return torch.tensor(adj, dtype=torch.float)
+
+    def getModel(self, num_hidden, K, dropout):
+        edge_weight = self.getInitialEdgeWeightMatrix()
+        sgc = SGCFeatureExtractor(num_nodes=62,
+                                  learn_edge_weight=True,
+                                  edge_weight=edge_weight,
+                                  num_features=self.dset.num_node_features,
+                                  num_hidden=num_hidden,
+                                  K=K)
+        label_classifier = LabelClassifier(62*self.dset.num_node_features, dropout)
+        
+        if self.use_cuda:
+            print('Using cuda. Total {:d} devices.'.format(torch.cuda.device_count()))
+            if torch.cuda.device_count() > 1:
+                sgc = DataParallel(sgc)
+                label_classifier = nn.DataParallel(label_classifier)
+        else:
+            print('Using cpu.')
+
+        return sgc.to(self.device), label_classifier.to(self.device)
+
+    def getSoftLabel(self, y, epsilon):
+        """[summary]
+
+        Args:
+            y : (batch_size, )
+
+        Returns:
+            soft_y : (batch_size, 3)
+        """
+        batch_size = y.size(dim=0)
+        soft_y = np.zeros((batch_size, 3))
+        for i in range(batch_size):
+            if y[i] == 0:
+                # negative
+                soft_y[i] = [1-2*epsilon/3, 2*epsilon/3, 0]
+            elif y[i] == 1:
+                # neutral
+                soft_y[i] = [epsilon/3, 1-2*epsilon/3, epsilon/3]
+            elif y[i] == 2:
+                # positive
+                soft_y[i] = [0, 2*epsilon/3, 1-2*epsilon/3]
+        
+        return torch.tensor(soft_y, dtype=torch.float, device=self.device)
+
+    def main(self):
+        runs = self.get_runs()
+        result = {}
+        for run in runs:
+            result[run] = {}
+            for ph in phases:
+                result[run][ph] = {}
+
+        for run in runs:
+            comment = ' RGNN lr={} num_hidden={} K={} dropout={} epsilon={}'.format(run.lr, run.num_hidden, run.K, run.dropout, run.epsilon)
+            
+            # dann_writer = SummaryWriter(comment=comment)
+
+            print('====== Hyper Parameter test: ' + comment)
+            start_outer = time.time()
+
+            cross_validation_results = {}
+            for ph in phases:
+                cross_validation_results[ph] = {}
+                for ind in indicators:
+                    cross_validation_results[ph][ind] = []
+
+            for train_idx, test_idx in self.split_strategy.split(self.dset, self.dset.data.y):
+                train_dset = self.dset[train_idx]
+                train_dset = train_dset.copy()
+                test_dset = self.dset[test_idx]
+                test_dset = test_dset.copy()
+
+                train_dloader = DataListLoader(train_dset, batch_size=16, shuffle=True, drop_last=True)
+                test_dloader = DataListLoader(test_dset, batch_size=16, shuffle=True, drop_last=True)
+
+                sgc, label_classifier = self.getModel(run.num_hidden, run.K, run.dropout)
+
+                optim = torch.optim.Adam(list(sgc.parameters())+list(label_classifier.parameters()), lr=run.lr, weight_decay=args.weight_decay)
+
+                sgc.train()
+                label_classifier.train()
+                for epoch in tqdm(range(1, self.maxepochs+1)):
+                    loss = 0
+                    label_pred_accuracy = 0
+
+                    n_batches = len(train_dloader)
+                    for train_graph_list in tqdm(train_dloader, leave=False, total=n_batches):
+                        # (batch_size, num_hidden)
+                        train_sgc_output = sgc(train_graph_list)
+                        # (batch_size, 3)
+                        train_labcl_output = label_classifier(train_sgc_output)
+
+                        y = torch.cat([data.y for data in train_graph_list]).to(train_labcl_output.device)
+                        if self.label_type == 'hard':
+                            loss_b = F.nll_loss(train_labcl_output, y)
+                        elif self.label_type == 'soft':
+                            soft_y = self.getSoftLabel(y, run.epsilon)
+                            loss_b = F.kl_div(train_labcl_output, soft_y)
+                        
+                        loss += loss_b
+
+                        optim.zero_grad()
+                        loss_b.backward()
+                        optim.step()
+
+                        label_pred_accuracy += (train_labcl_output.max(dim=1)[1] == y).float().mean().item()
+
+                    epa_mean = label_pred_accuracy / n_batches  # expected to increase
+
+                    # dann_writer.add_scalar('loss/total_loss', loss, epoch)
+                    # dann_writer.add_scalar('accuracy/label_pred_accuracy', epa_mean, epoch)
+                    # dann_writer.flush()
+                    # dann_writer.close()
+
+                    if epoch == 1 or epoch % 10 == 0:
+                        tqdm.write('Epoch {:6d}: train_label_pred_accuracy {:.4f}, loss {:.4f}'.format(epoch, epa_mean, loss))
+                    # tqdm.write('Epoch {:6d}: train_label_pred_accuracy {:.4f}'.format(epoch, epa_mean))
+                
+                sgc.eval()
+                label_classifier.eval()
+                validation_dloaders = [train_dloader, test_dloader]
+                # validation on train set, test set
+                for ph, der in zip(phases, validation_dloaders):
+                    with torch.no_grad():
+                        y_true, y_pred = [], []
+                        for graph_list in der:
+                            # (batch_size, num_hidden)
+                            sgc_output = sgc(graph_list)
+                            # (batch_size, 3)
+                            labcl_output = label_classifier(sgc_output)
+                            
+                            y_pred.append(torch.argmax(labcl_output, dim=1).detach().cpu().numpy())
+                            y = torch.cat([data.y for data in graph_list]).to(labcl_output.device)
+                            y_true.append(y.detach().cpu().numpy())
+                        
+                        y_true = np.concatenate(y_true, axis=0)
+                        y_pred = np.concatenate(y_pred, axis=0)
+                        acc = accuracy_score(y_true, y_pred)
+                        f1_macro = f1_score(y_true, y_pred, average='macro')
+                        cross_validation_results[ph]['accuracy'].append(acc)
+                        cross_validation_results[ph]['f1_macro'].append(f1_macro)
+                        tqdm.write('For this validation round, {} set accuracy/f1: {:.4f}/{:.4f}'.format(ph, acc, f1_macro))
+            
+            end_outer = time.time()
+            dur_outer = end_outer - start_outer
+            for ph in phases:
+                for ind in indicators:
+                    result[run][ph][ind] = np.array(cross_validation_results[ph][ind]).mean()
+            print('For this run, train time: {:4d}min {:2d}sec'.format(int(dur_outer // 60), int(dur_outer % 60)))
+        
+        best_run = runs[0]
+        for run in runs:
+            if(result[run]['test']['f1_macro'] > result[best_run]['test']['f1_macro']):
+                best_run = run
+        
+        print('====== Best hyper parameter: lr={} num_hidden={} K={} dropout={} epsilon={}'.format(best_run.lr, best_run.num_hidden, best_run.K, best_run.dropout, best_run.epsilon))
         return result[best_run]
 
 
@@ -672,273 +909,6 @@ class QDATrainApp:
         # plt.close('all')
 
         return result
-        
-
-class DANNTrainApp:
-    def __init__(self, dset, split_strategy):
-        self.dset = dset
-        self.split_strategy = split_strategy
-        # self.nworkers = os.cpu_count()
-        self.nworkers = 0
-        self.maxepochs = args.maxepochs
-        self.batch_size = 128
-
-        self.use_cuda = torch.cuda.is_available()
-        self.device = torch.device('cuda' if self.use_cuda else 'cpu')
-    
-    def get_runs(self):
-        params = OrderedDict(lr = eval(args.lr),
-                             lambda_ = eval(args.lambda_),
-                             alpha = eval(args.alpha))
-        Run = namedtuple('Run', params.keys())
-        runs = []
-        for v in product(*params.values()):
-            runs.append(Run(*v))
-
-        return runs
-
-    def getModel(self, lambda_):
-        dann = DANN()
-        domain_clf = DomainClassifier(lambda_)
-        if self.use_cuda:
-            print('Using cuda. Total {:d} devices.'.format(torch.cuda.device_count()))
-            if torch.cuda.device_count() > 1:
-                dann = nn.DataParallel(dann)
-                domain_clf = nn.DataParallel(domain_clf)
-        else:
-            print('Using cpu.')
-
-        return dann.to(self.device), domain_clf.to(self.device)
-
-    def init_weights(self, m):
-        if type(m) == nn.Linear:
-            torch.nn.init.xavier_uniform_(m.weight)
-            m.bias.data.fill_(0.01)
-
-    def getDataset(self):
-        assert self.split_strategy.get_n_splits() == 1
-        for train_indices, test_indices in self.split_strategy.split():
-            train_sampler = SubsetRandomSampler(train_indices)
-            test_sampler = SubsetRandomSampler(test_indices)
-
-        # if self.use_cuda:
-        #     self.batch_size *= torch.cuda.device_count()
-
-        # the size of source and target in each batch should be equal, otherwise the model tends to focus on source
-        source_dloader = DataLoader(self.dset, batch_size=self.batch_size // 2, num_workers=self.nworkers, pin_memory=self.use_cuda, shuffle=False, sampler=train_sampler)
-        target_dloader = DataLoader(self.dset, batch_size=self.batch_size // 2, num_workers=self.nworkers, pin_memory=self.use_cuda, shuffle=False, sampler=test_sampler)
-        
-        return source_dloader, target_dloader
-
-    def main(self):
-        runs = self.get_runs()
-        result = {}
-        for run in runs:
-            result[run] = {}
-            for ph in phases:
-                result[run][ph] = {}
-
-        for run in runs:
-            comment = ' DANN lr={} lambda_={} alpha={}'.format(run.lr, run.lambda_, run.alpha)
-            dann_writer = SummaryWriter(comment=comment)
-
-            print('Hyper Parameter test: ' + comment)
-            start_outer = time.time()
-
-            source_dloader, target_dloader = self.getDataset()
-            nbatches = min(len(source_dloader), len(target_dloader))
-
-            dann, domain_classifier = self.getModel(run.lambda_)
-            # weight initialization
-            dann.module.feature_extractor.apply(self.init_weights)
-            dann.module.emotion_classifier.apply(self.init_weights)
-            domain_classifier.apply(self.init_weights)
-
-            # optim = torch.optim.Adam(list(dann.parameters()) + list(domain_classifier.parameters()))
-            optim = torch.optim.SGD(list(dann.parameters()) + list(domain_classifier.parameters()), lr=run.lr)
-            
-            for epoch in tqdm(range(1, self.maxepochs+1)):
-                loss, emotion_loss, domain_loss = 0, 0, 0
-                emotion_pred_accuracy, domain_pred_accuracy = 0, 0
-
-                for (src_data, src_emotion_label), (tgt_data, tgt_emotion_label) in zip(source_dloader, target_dloader):
-                    src_domain_label = torch.zeros(src_emotion_label.size()[0]).to(torch.long)
-                    tgt_domain_label = torch.ones(tgt_emotion_label.size()[0]).to(torch.long)
-                    # (128, 62, 1, 5)
-                    x = torch.cat([src_data, tgt_data], 0).to(self.device)
-                    y_emotion = src_emotion_label.to(self.device)
-                    y_domain = torch.cat([src_domain_label, tgt_domain_label], 0).to(self.device)
-
-                    features = dann.module.feature_extractor(x)
-                    pred_emotion = dann.module.emotion_classifier(features[:src_data.size()[0]])
-                    pred_domain = domain_classifier(features)
-
-                    # for nn.xxx, need to declare and then use because it is class
-                    # for nn.functional.xxx, use directly
-                    emotion_loss_b = F.nll_loss(pred_emotion, y_emotion)
-                    emotion_loss += emotion_loss_b
-                    domain_loss_b = F.nll_loss(pred_domain, y_domain)
-                    domain_loss += domain_loss_b
-                    loss_b = emotion_loss_b + run.alpha * domain_loss_b
-                    loss += loss_b
-
-                    optim.zero_grad()
-                    loss_b.backward()
-                    optim.step()
-
-                    emotion_pred_accuracy += (pred_emotion.max(dim=1)[1] == y_emotion).float().mean().item()
-                    domain_pred_accuracy += (pred_domain.max(dim=1)[1] == y_domain).float().mean().item()
-
-                epa_mean = emotion_pred_accuracy / nbatches  # expected to increase
-                dpa_mean = domain_pred_accuracy / nbatches  # expected to approximate 50%
-
-                dann_writer.add_scalar('loss/total_loss', loss, epoch)
-                dann_writer.add_scalar('loss/emotion_loss', emotion_loss, epoch)
-                dann_writer.add_scalar('loss/domain_loss', domain_loss, epoch)
-                dann_writer.add_scalar('accuracy/emotion_pred_accuracy', epa_mean, epoch)
-                dann_writer.add_scalar('accuracy/domain_pred_accuracy', dpa_mean, epoch)
-                dann_writer.flush()
-                dann_writer.close()
-
-                if epoch == 1 or epoch % 100 == 0:
-                    tqdm.write('Epoch {:6d}: train_emotion_pred_accuracy {:.4f}, train_domain_pred_accuracy {:.4f}'.format(epoch, epa_mean, dpa_mean))
-            
-            validation_dloaders = [source_dloader, target_dloader]
-            # validation on train set, test set
-            for ph, der in zip(phases, validation_dloaders):
-                with torch.no_grad():
-                    y_true, y_pred = [], []
-                    for tx, ty_e in der:
-                        tx = tx.to(self.device, non_blocking=True)
-                        ty_e = ty_e.to(self.device, non_blocking=True)
-
-                        tpred_e = dann(tx)
-                        y_p = tpred_e.max(dim=1)[1].to(device='cpu').numpy()
-                        y_t = ty_e.to(device='cpu').numpy()
-                        y_true.append(y_t)
-                        y_pred.append(y_p)
-                    
-                    y_true = np.concatenate(y_true, axis=0)
-                    y_pred = np.concatenate(y_pred, axis=0)
-                    acc = accuracy_score(y_true, y_pred)
-                    f1_macro = f1_score(y_true, y_pred, average='macro')
-                    result[run][ph]['accuracy'] = acc
-                    result[run][ph]['f1_macro'] = f1_macro
-                    tqdm.write('For this run, {} set accuracy/f1: {:.4f}/{:.4f}'.format(ph, acc, f1_macro))
-        
-            end_outer = time.time()
-            dur_outer = end_outer - start_outer
-            print('For this run, train time: {:4d}min {:2d}sec'.format(int(dur_outer // 60), int(dur_outer % 60)))
-        
-        best_run = runs[0]
-        for run in runs:
-            if(result[run]['test']['f1_macro'] > result[best_run]['test']['f1_macro']):
-                best_run = run
-        
-        print('Best hyper parameter: lr={} lambda_={} alpha={}'.format(run.lr, run.lambda_, run.alpha))
-        return result[best_run]
-
-
-class LSTMTrainApp:
-    def __init__(self):
-        self.dir_path = args.datapath
-        self.nworkers = os.cpu_count()
-        self.lr = args.lr
-        self.maxepochs = args.maxepochs
-        
-        self.hidden_size = args.hidden_size
-        self.num_layers = args.num_layers
-        self.num_classes = 4
-
-        self.use_cuda = torch.cuda.is_available()
-        self.device = torch.device('cuda' if self.use_cuda else 'cpu')
-
-    def getModel(self, seq_len, input_size):
-        model = LSTM_Classification(seq_len, input_size, self.hidden_size, self.num_layers, self.num_classes)
-
-        if self.use_cuda:
-            print('Using cuda. Total {:d} devices.'.format(torch.cuda.device_count()))
-            # if torch.cuda.device_count() > 1:
-            #     dann = nn.DataParallel(dann)
-            #     domain_clf = nn.DataParallel(domain_clf)
-        else:
-            print('Using cpu.')
-        return model.to(self.device)
-    
-    def getDataset(self, feature, smooth_method, frq_bands, target_subject):
-        dset_train = SEED_IV(self.dir_path, feature, smooth_method, frq_bands, [i for i in range(1, 16) if i != target_subject])
-        dset_test = SEED_IV(self.dir_path, feature, smooth_method, frq_bands, [target_subject])
-
-        dloader_train = DataLoader(dset_train, batch_size=128, num_workers=self.nworkers, pin_memory=self.use_cuda, shuffle=True)
-        dloader_test = DataLoader(dset_test, batch_size=128, num_workers=self.nworkers, pin_memory=self.use_cuda, shuffle=True)
-        return dloader_train, dloader_test, dset_train.data.size()[1]
-
-    def main(self):
-        print('#'*100)
-        print('LSTM\n')
-
-        for feature in ['de', 'psd']:
-            for smooth_method in ['movingAve', 'LDS']:
-                for frq_bands in [['delta'], ['theta'], ['alpha'], ['beta'], ['gamma'], ['delta', 'theta', 'alpha', 'beta', 'gamma']]:
-                    print('\nFeature in use: {}\nFrequency bands in use: {} >>>'.format(feature+'_'+smooth_method, str(frq_bands)))
-                    test_accuracies = []
-                    start_outer = time.time()
-                    for target_subject in range(1, 16):
-                        print('Target on {}'.format(target_subject))
-                        dloader_train, dloader_test, seq_dim = self.getDataset(feature, smooth_method, frq_bands, target_subject)
-                        
-                        seq_len = 2
-                        input_size = seq_dim // 2
-
-                        model = self.getModel(seq_len, input_size)
-                        # optim = opt.Adam(self.model.parameters(), lr=self.lr, weight_decay=0.1)
-                        optim = opt.Adam(model.parameters(), lr=self.lr)
-
-                        for epoch in tqdm(range(1, self.maxepochs+1)):
-                            train_pred_right = 0
-                            train_total = 0
-                            for x, y in dloader_train:
-                                x = x.view(-1, seq_len, input_size).to(self.device)
-                                y = y.to(self.device)
-
-                                pred = model(x)
-
-                                loss = F.nll_loss(pred, y)
-
-                                optim.zero_grad()
-                                loss.backward()
-                                optim.step()
-
-                                train_pred_right += (pred.max(dim=1)[1] == y).float().sum().item()
-                                train_total += x.shape[0]
-                            
-                            train_pred_acc = train_pred_right / train_total
-                            if epoch == 1 or epoch % 100 == 0:
-                                tqdm.write('Epoch {:6d}: train_pred_accuracy {:10.4f}'.format(epoch, train_pred_acc))
-                        
-                        with torch.no_grad():
-                            test_pred_right = 0
-                            test_total = 0
-                            for x, y in dloader_test:
-                                x = x.view(-1, seq_len, input_size).to(self.device)
-                                y = y.to(self.device)
-
-                                pred = model(x)
-
-                                test_pred_right += (pred.max(dim=1)[1] == y).float().sum().item()
-                                test_total += x.shape[0]
-                            
-                            test_pred_acc = test_pred_right / test_total
-                        
-                        test_accuracies.append(test_pred_acc)
-                    
-                    end_outer = time.time()
-                    dur_outer = end_outer - start_outer
-                    print('Train time: {:4d}min {:2d}sec'.format(int(dur_outer // 60), int(dur_outer % 60)))
-
-                    cv_acc_mean = torch.tensor(test_accuracies).mean().item()
-                    cv_acc_std = torch.tensor(test_accuracies).std().item()
-                    print('Leave-one-out cross validation, mean: {:10.4f}, std: {:10.4f}'.format(cv_acc_mean, cv_acc_std))
 
 
 def heatmap(data, row_labels, col_labels, ax=None,
@@ -1061,111 +1031,67 @@ def annotate_heatmap(im, data=None, valfmt="{x:.2f}",
 
 
 if __name__ == '__main__':
+    freq_bands = eval(args.freqbands)
     nslices_per_img = int(30 / args.slice_length)
-    nsamples = 60 * nslices_per_img
 
     print('#'*50, 'Experiment: ', args.exp)
     feature = args.feature
     print('#'*30, 'Feature: ', feature)
     for freq in freq_bands:
         print('#'*20, 'Freq. Band: ', freq)
-        model_name = None
         exp_result = {}
 
         if args.exp == 'subj_dep':
             for subject in subjects:
                 print('#'*10, 'Train on ', subject)
 
-                data_path = data_dir + '{}sAll/{}_data_{}_{}s.npy'.format(args.slice_length, subject, feature, args.slice_length)
-                label_path = data_dir + '{}sAll/{}_label_{}s.npy'.format(args.slice_length, subject, args.slice_length)
-                dset = ArtDataset([data_path], [label_path], freq_band=freq)
-                
-                split_strategy = StratifiedShuffleSplit(n_splits=6, test_size=int(nsamples/6))
-                
                 if args.which == 0:
                     model_name = 'SVM'
                     print('>>> Model: SVM')
+                    dset = ArtDataset(args.slice_length, feature, freq, [subject], exclude_imgs, oversample=True)
+                    split_strategy = StratifiedShuffleSplit(n_splits=6, test_size=1/6)
                     result = SVMTrainApp(dset, split_strategy).main()
                 elif args.which == 1:
                     model_name = 'GNN'
                     print('>>> Model: GNN')
-                    result = GNNTrainApp(dset, split_strategy).main()
-                elif args.which == 2:
-                    model_name = 'KNN'
-                    print('>>> Model: KNN')
-                    result = KNNTrainApp(dset, split_strategy).main()
-                elif args.which == 3:
-                    model_name = 'GaussianProcess'
-                    print('>>> Model: GaussianProcess')
-                    result = GPTrainApp(dset, split_strategy).main()
-                elif args.which == 4:
-                    model_name = 'DecisionTree'
-                    print('>>> Model: DecisionTree')
-                    result = DTTrainApp(dset, split_strategy).main()
-                elif args.which == 5:
-                    model_name = 'RandomForest'
-                    print('>>> Model: RandomForest')
-                    result = RFTrainApp(dset, split_strategy).main()
-                elif args.which == 6:
-                    model_name = 'AdaBoost'
-                    print('>>> Model: AdaBoost')
-                    result = ABTrainApp(dset, split_strategy).main()
-                elif args.which == 7:
-                    model_name = 'QuadraticDiscriminantAnalysis'
-                    print('>>> Model: QuadraticDiscriminantAnalysis')
-                    result = QDATrainApp(dset, split_strategy).main()
+                    graph_data_dir = graph_data_root_dir + 'subjdep_{}s_{}_{}_{}_{}'.format(args.slice_length, feature, freq, subject, f"{datetime.datetime.now():%Y-%m-%d%-%H-%M}")
+                    if not os.path.exists(graph_data_dir):
+                        os.makedirs(graph_data_dir)
+                    dset = ArtGraphDataset(args.slice_length, feature, freq, [subject], exclude_imgs, graph_data_dir)
+                    split_strategy = StratifiedShuffleSplit(n_splits=6, test_size=1/6)
+                    result = GNNTrainApp(dset, split_strategy, args.label_type).main()
                 
                 exp_result[subject] = result
         elif args.exp == 'subj_indep':
-            data_paths = [data_dir + '{}sAll/{}_data_{}_{}s.npy'.format(args.slice_length, subj, feature, args.slice_length) for subj in subjects]
-            label_paths = [data_dir + '{}sAll/{}_label_{}s.npy'.format(args.slice_length, subj, args.slice_length) for subj in subjects]
-            dset = ArtDataset(data_paths, label_paths, freq_band=freq)
-
             for subject in subjects:
                 print('#'*10, 'Target on ', subject)
-                subj_idx = subjects.index(subject)
-
-                test_fold = np.empty(len(subjects)*nsamples, dtype=np.int8)
-                test_fold.fill(-1)
-                test_fold[subj_idx*nsamples: (subj_idx+1)*nsamples] = 0
-                split_strategy = PredefinedSplit(test_fold)
                 
                 if args.which == 0:
                     model_name = 'SVM'
                     print('>>> Model: SVM')
+                    dset = ArtDataset(args.slice_length, feature, freq, subjects, exclude_imgs, oversample=True)
+                    subj_idx = subjects.index(subject)
+                    nimgs_total = sum(nimgs_each_subject)
+                    test_fold = np.empty(nimgs_total*nslices_per_img, dtype=np.int8)
+                    test_fold.fill(-1)
+                    test_fold[sum(nimgs_each_subject[:subj_idx])*nslices_per_img: sum(nimgs_each_subject[:subj_idx+1])*nslices_per_img] = 0
+                    split_strategy = PredefinedSplit(test_fold)
                     result = SVMTrainApp(dset, split_strategy).main()
                 elif args.which == 1:
                     model_name = 'GNN'
                     print('>>> Model: GNN')
-                    result = GNNTrainApp(dset, split_strategy).main()
-                elif args.which == 2:
-                    model_name = 'KNN'
-                    print('>>> Model: KNN')
-                    result = KNNTrainApp(dset, split_strategy).main()
-                elif args.which == 3:
-                    model_name = 'GaussianProcess'
-                    print('>>> Model: GaussianProcess')
-                    result = GPTrainApp(dset, split_strategy).main()
-                elif args.which == 4:
-                    model_name = 'DecisionTree'
-                    print('>>> Model: DecisionTree')
-                    result = DTTrainApp(dset, split_strategy).main()
-                elif args.which == 5:
-                    model_name = 'RandomForest'
-                    print('>>> Model: RandomForest')
-                    result = RFTrainApp(dset, split_strategy).main()
-                elif args.which == 6:
-                    model_name = 'AdaBoost'
-                    print('>>> Model: AdaBoost')
-                    result = ABTrainApp(dset, split_strategy).main()
-                elif args.which == 7:
-                    model_name = 'QuadraticDiscriminantAnalysis'
-                    print('>>> Model: QuadraticDiscriminantAnalysis')
-                    result = QDATrainApp(dset, split_strategy).main()
-                elif args.which == 8:
-                    model_name = 'DANN'
-                    print('>>> Model: DANN')
-                    result = DANNTrainApp(dset, split_strategy).main()
+                    train_subjects = subjects.copy()
+                    train_subjects.remove(subject)
+                    test_subjects = [subject]
+                    train_graph_data_dir = graph_data_root_dir + 'subjindep_train_{}s_{}_{}_{}_{}'.format(args.slice_length, feature, freq, subject, f"{datetime.datetime.now():%Y-%m-%d%-%H-%M}")
+                    test_graph_data_dir = graph_data_root_dir + 'subjindep_test_{}s_{}_{}_{}_{}'.format(args.slice_length, feature, freq, subject, f"{datetime.datetime.now():%Y-%m-%d%-%H-%M}")
+                    if not os.path.exists(train_graph_data_dir):
+                        os.makedirs(train_graph_data_dir)
+                    if not os.path.exists(test_graph_data_dir):
+                        os.makedirs(test_graph_data_dir)
+                    train_dset = ArtGraphDataset(args.slice_length, feature, freq, train_subjects, exclude_imgs, train_graph_data_dir)
+                    test_dset = ArtGraphDataset(args.slice_length, feature, freq, test_subjects, exclude_imgs, test_graph_data_dir)
+                    result = GNNDomainAdaptationTrainApp(train_dset, test_dset, args.label_type).main()
                 
                 exp_result[subject] = result
 
@@ -1180,7 +1106,7 @@ if __name__ == '__main__':
         plt.style.use('seaborn')
         x = np.arange(0, (len(subjects)-1)*2.5+1, 2.5)  # the label locations
         width = 1.0  # the width of the bars
-        fig, ax = plt.subplots(figsize=(14.8, 7.8))
+        fig, ax = plt.subplots(figsize=(35, 7.8))
         acc_train_rect = ax.bar(x - width/2, subj_train_accs, width, label='Train/Acc', fill=False, ls='--')
         acc_test_rect = ax.bar(x - width/2, subj_test_accs, width, label='Test/Acc')
         f1_train_rect = ax.bar(x + width/2, subj_train_f1s, width, label='Train/F1', fill=False, ls='--')
@@ -1192,13 +1118,13 @@ if __name__ == '__main__':
         ax.set_xticklabels(subjects)
         ax.set_ylim(0.0, 1.0)
         box = ax.get_position()
-        ax.set_position([box.x0, box.y0, box.width * 0.8, box.height])
+        ax.set_position([box.x0, box.y0, box.width * 0.9, box.height])
         ax.legend([acc_train_rect, acc_test_rect, f1_test_rect], ['Train', 'Test/Acc.', 'Test/F1.'], loc='center left', bbox_to_anchor=(1, 0.5))
         ax.bar_label(acc_train_rect, padding=3)
         ax.bar_label(acc_test_rect, padding=3)
         ax.bar_label(f1_train_rect, padding=3)
         ax.bar_label(f1_test_rect, padding=3)
-        fig.savefig('./figs20211118/All/{}_{}_{}s_{}_{}.png'.format(args.exp, feature, args.slice_length, freq, model_name))
+        fig.savefig('./figs20211202/{}_{}_{}s_{}_{}.png'.format(args.exp, feature, args.slice_length, freq, model_name))
         plt.close('all')
 
         print('====Train:\nacc: {:.4f}/{:.4f}\nf1: {:.4f}/{:.4f}'.format(subj_train_accs.mean(), subj_train_accs.std(), subj_train_f1s.mean(), subj_train_f1s.std()))
