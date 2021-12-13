@@ -161,23 +161,21 @@ class GradientReversalFuntion(Function):
     @staticmethod
     def forward(ctx, x, lambda_):
         ctx.lambda_ = lambda_
-        return x.clone()
+        return x.view_as(x)
 
     @staticmethod
     def backward(ctx, grads):
-        lambda_ = ctx.lambda_
-        lambda_ = grads.new_tensor(lambda_)
-        dx = -lambda_ * grads
+        dx = ctx.lambda_ * grads.neg()
         return dx, None
 
 
+# with changing lambda
 class GradientReversalLayer(nn.Module):
-    def __init__(self, lambda_=1):
+    def __init__(self):
         super().__init__()
-        self.lambda_ = lambda_
 
-    def forward(self, x):
-        return GradientReversalFuntion.apply(x, self.lambda_)
+    def forward(self, x, lambda_):
+        return GradientReversalFuntion.apply(x, lambda_)
 
 
 class SGCFeatureExtractor(nn.Module):
@@ -253,22 +251,56 @@ class LabelClassifier(nn.Module):
 
 
 class DomainClassifier(nn.Module):
-    def __init__(self, input_dim, dropout, lambda_):
+    def __init__(self, input_dim, dropout):
         super(DomainClassifier, self).__init__()
 
-        self.gradrev = GradientReversalLayer(lambda_=lambda_)
+        self.gradrev = GradientReversalLayer()
 
-        self.fc1 = nn.Linear(input_dim, input_dim//2)
+        self.fc1 = nn.Linear(input_dim, input_dim // 2)
         self.bn = nn.BatchNorm1d(input_dim//2)
         self.dropout = dropout
         self.fc2 = nn.Linear(input_dim//2, 2)
         self.lsm = nn.LogSoftmax(dim=1)
 
-    def forward(self, x):
-        x = self.gradrev(x)
+    def forward(self, x, lambda_):
+        x = self.gradrev(x, lambda_)
         x = self.fc1(x)
         x = F.leaky_relu(self.bn(x))
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.fc2(x)
         x = self.lsm(x)
         return x
+
+
+class AutoEncoder(nn.Module):
+    def __init__(self, input_dim):
+        super(AutoEncoder, self).__init__()
+
+        # Encoder
+        # eye (23)
+        # 1s (62, 5, 1) -> (62*3)
+        # 3s (62, 5, 3) -> (62*13)
+        # 5s (62, 5, 5) -> (62*20)
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, input_dim // 2),
+            nn.Tanh(),
+            nn.Linear(input_dim // 2, input_dim // 4),
+            nn.Tanh(),
+            nn.Linear(input_dim // 4, input_dim // 8),
+        )
+
+        # Decoder
+        self.decoder = nn.Sequential(
+            nn.Linear(input_dim // 8, input_dim // 4),
+            nn.Tanh(),
+            nn.Linear(input_dim // 4, input_dim // 2),
+            nn.Tanh(),
+            nn.Linear(input_dim // 2, input_dim),
+            nn.Sigmoid()
+        )
+
+    def forward(self, inputs):
+        codes = self.encoder(inputs)
+        decoded = self.decoder(codes)
+
+        return codes, decoded

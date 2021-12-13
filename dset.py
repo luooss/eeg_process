@@ -5,7 +5,7 @@ from torch.utils.data import Dataset
 import scipy.io as sio
 import numpy as np
 from torch_geometric.data import InMemoryDataset, Data
-from imblearn.over_sampling import SMOTE
+from imblearn.over_sampling import SMOTE, RandomOverSampler
 
 
 freq_bands = ['delta', 'theta', 'alpha', 'beta', 'gamma']
@@ -37,6 +37,7 @@ class ArtGraphDataset(InMemoryDataset):
             self.idx_band = freq_bands.index(freq_band)
         self.subjects = subjects
         self.exclude_images = exclude_images
+        self.oversample = oversample
         super(ArtGraphDataset, self).__init__(root, transform, pre_transform)
         self.data, self.slices = torch.load(self.processed_paths[0])
 
@@ -72,8 +73,11 @@ class ArtGraphDataset(InMemoryDataset):
             if self.idx_band != -1:
                 data = data[:, :, self.idx_band, :]
             ncases = data.shape[0]
-            for i in range(ncases):
-                # simply flatten
+            data = np.reshape(data, (ncases, -1))
+            if self.oversample:
+                rs = RandomOverSampler()
+                data, label = rs.fit_resample(data, label)
+            for i in range(data.shape[0]):
                 x = torch.tensor(np.reshape(data[i], [62, -1]), dtype=torch.float)
                 y = torch.tensor([label[i]], dtype=torch.long)
                 edge_index = [[i, j] for i in range(62) for j in range(62)]
@@ -123,17 +127,14 @@ class ArtDataset(Dataset):
             
             ncases = data_.shape[0]
             data_ = np.reshape(data_, (ncases, -1))
+            if oversample:
+                rs = RandomOverSampler()
+                data_, label_ = rs.fit_resample(data_, label_)
             self.data.append(data_)
             self.label.append(label_)
-        
-        self.data = np.concatenate(self.data, axis=0)
-        self.label = np.concatenate(self.label, axis=0)
-        if oversample:
-            sm = SMOTE(n_jobs=16)
-            self.data, self.label = sm.fit_resample(self.data, self.label)
 
-        self.data = torch.from_numpy(self.data).to(torch.float)
-        self.label = torch.from_numpy(self.label).to(torch.long)
+        self.data = torch.from_numpy(np.concatenate(self.data, axis=0)).to(torch.float)
+        self.label = torch.from_numpy(np.concatenate(self.label, axis=0)).to(torch.long)
     
     def __len__(self):
         return self.data.shape[0]
