@@ -6,14 +6,138 @@ import scipy.io as sio
 import numpy as np
 from torch_geometric.data import InMemoryDataset, Data
 from imblearn.over_sampling import SMOTE, RandomOverSampler
+from sklearn.preprocessing import StandardScaler
 
 
 freq_bands = ['delta', 'theta', 'alpha', 'beta', 'gamma']
 data_path_temp = r'/mnt/xlancefs/home/gwl20/code/data/features/{}s/{}_data_{}_{}s.npy'
 label_path_temp = r'/mnt/xlancefs/home/gwl20/code/data/features/{}s/{}_label_{}s.npy'
 
+eegeye_data_temp = r'/mnt/xlancefs/home/gwl20/code/data/eegeye/{}_data_{}_de_{}s.npy'
+eegeye_label_temp = r'/mnt/xlancefs/home/gwl20/code/data/eegeye/{}_label_{}_de_{}s.npy'
+
 img_order = np.load(r'/mnt/xlancefs/home/gwl20/code/data/img_order.npy', allow_pickle=True).item()
 
+
+#### EEG + Eye
+class EEGEyeDataset(Dataset):
+    def __init__(self, slice_length, feature, freq_band, subjects):
+        super().__init__()
+
+        self.data = []
+        self.label = []
+        
+        for subject in subjects:
+            data_path = eegeye_data_temp.format(subject, freq_band, slice_length)
+            label_path = eegeye_label_temp.format(subject, freq_band, slice_length)
+
+            data_ = np.load(data_path)
+            label_ = np.load(label_path)
+
+            self.data.append(data_)
+            self.label.append(label_)
+
+        self.data = torch.from_numpy(np.concatenate(self.data, axis=0)).to(torch.float)
+        self.label = torch.from_numpy(np.concatenate(self.label, axis=0)).to(torch.long)
+    
+    def __len__(self):
+        return self.data.shape[0]
+    
+    def __getitem__(self, index):
+        return self.data[index], self.label[index]
+
+
+class EEGEyeArtGraphDataset(InMemoryDataset):
+    def __init__(self, slice_length, feature, freq_band, subjects, root, transform=None, pre_transform=None):
+        """[summary]
+
+        Args:
+            slice_length (int): 1s, 3s, 5s
+            feature (str): psd, de
+            freq_band (str):
+            subjects (list of str):
+            root (str):
+            transform ([type], optional): [description]. Defaults to None.
+            pre_transform ([type], optional): [description]. Defaults to None.
+        """
+        self.slice_length = slice_length
+        self.feature = feature
+        self.freq_band = freq_band
+        self.subjects = subjects
+        super(EEGEyeArtGraphDataset, self).__init__(root, transform, pre_transform)
+        self.data, self.slices = torch.load(self.processed_paths[0])
+
+    @property
+    def raw_file_names(self):
+        return []
+
+    @property
+    def processed_file_names(self):
+        return ['data.pt']
+
+    def download(self):
+        # Download to `self.raw_dir`
+        pass
+
+    def process(self):
+        # Read data into huge `Data` list.
+        data_list = []
+        for subject in self.subjects:
+            data_path = eegeye_data_temp.format(subject, self.freq_band, self.slice_length)
+            label_path = eegeye_label_temp.format(subject, self.freq_band, self.slice_length)
+
+            data = np.load(data_path)
+            data = StandardScaler().fit_transform(data)
+            label = np.load(label_path)
+
+            for i in range(data.shape[0]):
+                x = torch.tensor(np.reshape(data[i, :-115], [62, -1]), dtype=torch.float)
+                y = torch.tensor([label[i]], dtype=torch.long)
+                edge_index = [[i, j] for i in range(62) for j in range(62)]
+                edge_index = torch.tensor(edge_index, dtype=torch.long).t()
+                assert edge_index.shape[1] == 62 * 62
+                graph_data = Data(x=x, edge_index=edge_index, y=y)
+                data_list.append(graph_data)
+
+        if self.pre_filter is not None:
+            data_list = [data for data in data_list if self.pre_filter(data)]
+
+        if self.pre_transform is not None:
+            data_list = [self.pre_transform(data) for data in data_list]
+
+        data, slices = self.collate(data_list)
+        torch.save((data, slices), self.processed_paths[0])
+
+
+class EEGEyeArtDataset(Dataset):
+    def __init__(self, slice_length, feature, freq_band, subjects):
+        super().__init__()
+
+        self.data = []
+        self.label = []
+        
+        for subject in subjects:
+            data_path = eegeye_data_temp.format(subject, freq_band, slice_length)
+            label_path = eegeye_label_temp.format(subject, freq_band, slice_length)
+
+            data_ = np.load(data_path)
+            data_ = StandardScaler().fit_transform(data_)
+            label_ = np.load(label_path)
+
+            self.data.append(data_[:, -115:])
+            self.label.append(label_)
+
+        self.data = torch.from_numpy(np.concatenate(self.data, axis=0)).to(torch.float)
+        self.label = torch.from_numpy(np.concatenate(self.label, axis=0)).to(torch.long)
+    
+    def __len__(self):
+        return self.data.shape[0]
+    
+    def __getitem__(self, index):
+        return self.data[index], self.label[index]
+
+
+#### EEG
 # train test set into separate Datasets
 class ArtGraphDataset(InMemoryDataset):
     def __init__(self, slice_length, feature, freq_band, subjects, exclude_images, root, oversample=False, transform=None, pre_transform=None):
@@ -75,7 +199,7 @@ class ArtGraphDataset(InMemoryDataset):
             ncases = data.shape[0]
             data = np.reshape(data, (ncases, -1))
             if self.oversample:
-                rs = RandomOverSampler()
+                rs = SMOTE()
                 data, label = rs.fit_resample(data, label)
             for i in range(data.shape[0]):
                 x = torch.tensor(np.reshape(data[i], [62, -1]), dtype=torch.float)
@@ -94,7 +218,6 @@ class ArtGraphDataset(InMemoryDataset):
 
         data, slices = self.collate(data_list)
         torch.save((data, slices), self.processed_paths[0])
-
 
 
 class ArtDataset(Dataset):
@@ -128,7 +251,7 @@ class ArtDataset(Dataset):
             ncases = data_.shape[0]
             data_ = np.reshape(data_, (ncases, -1))
             if oversample:
-                rs = RandomOverSampler()
+                rs = SMOTE()
                 data_, label_ = rs.fit_resample(data_, label_)
             self.data.append(data_)
             self.label.append(label_)

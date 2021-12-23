@@ -235,19 +235,18 @@ class LabelClassifier(nn.Module):
         super(LabelClassifier, self).__init__()
         # if you want to apply additional operations in between layers, wirte them separately
         # or use nn.Sequential()
-        self.fc1 = nn.Linear(input_dim, input_dim//2)
-        self.bn = nn.BatchNorm1d(input_dim//2)
-        self.dropout = dropout
-        self.fc2 = nn.Linear(input_dim//2, 3)
-        self.lsm = nn.LogSoftmax(dim=1)
+        self.model = nn.Sequential(
+            nn.Linear(input_dim, input_dim//2),
+            nn.BatchNorm1d(input_dim//2),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+
+            nn.Linear(input_dim//2, 3),
+            nn.LogSoftmax(dim=1)
+        )
 
     def forward(self, x):
-        x = self.fc1(x)
-        x = F.leaky_relu(self.bn(x))
-        x = F.dropout(x, p=self.dropout, training=self.training)
-        x = self.fc2(x)
-        x = self.lsm(x)
-        return x
+        return self.model(x)
 
 
 class DomainClassifier(nn.Module):
@@ -273,7 +272,7 @@ class DomainClassifier(nn.Module):
 
 
 class AutoEncoder(nn.Module):
-    def __init__(self, input_dim):
+    def __init__(self, input_dim, dropout):
         super(AutoEncoder, self).__init__()
 
         # Encoder
@@ -282,21 +281,20 @@ class AutoEncoder(nn.Module):
         # 3s (62, 5, 3) -> (62*13)
         # 5s (62, 5, 5) -> (62*20)
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim, input_dim // 2),
+            nn.Dropout(dropout),
+            nn.Linear(input_dim, input_dim//2),
             nn.Tanh(),
-            nn.Linear(input_dim // 2, input_dim // 4),
-            nn.Tanh(),
-            nn.Linear(input_dim // 4, input_dim // 8),
+            nn.Dropout(dropout),
+            nn.Linear(input_dim//2, input_dim//4),
         )
 
         # Decoder
         self.decoder = nn.Sequential(
-            nn.Linear(input_dim // 8, input_dim // 4),
+            nn.Dropout(dropout),
+            nn.Linear(input_dim//4, input_dim//2),
             nn.Tanh(),
-            nn.Linear(input_dim // 4, input_dim // 2),
-            nn.Tanh(),
-            nn.Linear(input_dim // 2, input_dim),
-            nn.Sigmoid()
+            nn.Dropout(dropout),
+            nn.Linear(input_dim//2, input_dim),
         )
 
     def forward(self, inputs):

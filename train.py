@@ -6,6 +6,7 @@ import numpy as np
 import datetime
 from pprint import pprint
 import logging
+import math
 
 from tqdm import tqdm
 
@@ -13,7 +14,7 @@ from collections import OrderedDict, namedtuple
 from itertools import product
 
 import torch
-from torch.utils.data import DataLoader, SubsetRandomSampler
+from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 import torch.nn as nn
 import torch.nn.functional as F
@@ -32,7 +33,7 @@ from sklearn.gaussian_process.kernels import RBF
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 # KFold is not enough, need to make sure the ratio between classes is the same in both train set and test set
-from sklearn.model_selection import GridSearchCV, StratifiedShuffleSplit, PredefinedSplit
+from sklearn.model_selection import GridSearchCV, StratifiedShuffleSplit, PredefinedSplit, StratifiedKFold
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -74,6 +75,14 @@ parser.add_argument('--lr',
                     help='Learning rate',
                     default='np.logspace(-4, -1, 4)',
                     type=str)
+parser.add_argument('--lr_fe',
+                    help='Learning rate',
+                    default='np.logspace(-4, -1, 4)',
+                    type=str)
+parser.add_argument('--lr_lc',
+                    help='Learning rate',
+                    default='np.logspace(-4, -1, 4)',
+                    type=str)
 parser.add_argument('--weight_decay',
                     help='Weight decay for optimizer',
                     default='1e-5',
@@ -106,16 +115,29 @@ parser.add_argument('--alpha',
                     help='Coefficient of domain prediction loss',
                     default='np.logspace(-4, 0, 5)',
                     type=str)
-
+parser.add_argument('--reclosse',
+                    help='Coefficient of reconstruct loss',
+                    default='np.logspace(-4, 0, 5)',
+                    type=str)
+parser.add_argument('--lablosse',
+                    help='Coefficient of reconstruct loss',
+                    default='np.logspace(-4, 0, 5)',
+                    type=str)
 
 args = parser.parse_args()
 
-# subjects = ['zuoyaxi', 'zhangliuxin', 'zhaosijia', 'zhuyangxiangru', 'pujizhou', 'chenbingliang', 'mengdong', 'zhengxucen',
-#             'hexingtao', 'wanghuiling', 'panshuyi', 'wangsifan', 'zhaochangquan', 'wuxiangyu', 'xiajingtao', 'liujiaxin',
-#             'wangyanchu', 'liyizhou', 'weifenfen', 'chengyuting', 'chenjiajing', 'matianfang', 'liuledian', 'zuogangao', 'feicheng', 'xuyutong']
-subjects = ['zuoyaxi', 'zhangliuxin', 'zhaosijia', 'zhuyangxiangru', 'pujizhou', 'chenbingliang', 'zhengxucen',
-            'hexingtao', 'wanghuiling', 'panshuyi', 'zhaochangquan', 'wangyanchu', 'liyizhou', 'chengyuting',
-            'chenjiajing', 'matianfang', 'liuledian', 'zuogangao', 'feicheng', 'xuyutong']
+all_subjects = ['zuoyaxi', 'zhangliuxin', 'zhaosijia', 'zhuyangxiangru', 'pujizhou', 'chenbingliang', 'mengdong', 'zhengxucen',
+            'hexingtao', 'wanghuiling', 'panshuyi', 'wangsifan', 'zhaochangquan', 'wuxiangyu', 'xiajingtao', 'liujiaxin',
+            'wangyanchu', 'liyizhou', 'weifenfen', 'chengyuting', 'chenjiajing', 'matianfang', 'liuledian', 'zuogangao', 'feicheng', 'xuyutong']
+# subjects = ['zuoyaxi', 'zhangliuxin', 'zhaosijia', 'zhuyangxiangru', 'pujizhou', 'chenbingliang', 'zhengxucen',
+#             'hexingtao', 'wanghuiling', 'panshuyi', 'zhaochangquan', 'wangyanchu', 'liyizhou', 'chengyuting',
+#             'chenjiajing', 'matianfang', 'liuledian', 'zuogangao', 'feicheng', 'xuyutong']
+eyedata_missed = ['zhuyangxiangru', 'zhaochangquan']
+
+subjects = ['zuoyaxi', 'zhangliuxin', 'zhaosijia', 'pujizhou', 'chenbingliang', 'zhengxucen',
+            'hexingtao', 'wanghuiling', 'panshuyi', 'xiajingtao', 'liujiaxin',
+            'wangyanchu', 'liyizhou', 'chengyuting', 'chenjiajing', 'matianfang', 'liuledian', 'zuogangao', 'feicheng', 'xuyutong']
+
 phases = ['train', 'test']
 indicators = ['accuracy', 'f1_macro']
 data_dir = r'/mnt/xlancefs/home/gwl20/code/data/features/'
@@ -133,7 +155,7 @@ console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(log_formatter)
 
-file_handler = logging.FileHandler('./logs/{}_{}_{}.log'.format(args.exp, args.which, args.slice_length), mode='w')
+file_handler = logging.FileHandler('./logs/eegeye_{}_{}_{}.log'.format(args.exp, args.which, args.slice_length), mode='w')
 file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(log_formatter)
 
@@ -152,8 +174,9 @@ class SVMTrainApp:
         self.label = dset.label.numpy()
         self.split_strategy = split_strategy
 
-        hyperparams = [{'kernel': ['rbf'], 'C': np.logspace(-4, 0, 5), 'gamma': ['scale', 'auto']},
-                       {'kernel': ['linear'], 'C': np.logspace(-4, 0, 5)}]
+        # hyperparams = [{'kernel': ['rbf'], 'C': [math.pow(2, p) for p in range(-10, 10)], 'gamma': ['scale', 'auto']},
+        #                {'kernel': ['linear'], 'C': [math.pow(2, p) for p in range(-10, 10)]}]
+        hyperparams = [{'kernel': ['linear'], 'C': [math.pow(2, p) for p in range(-10, 10)]}]
         # refit: after hp is determined, learn the best lp over the whole dataset, this is for prediction
         self.model = GridSearchCV(SVC(),
                                   param_grid=hyperparams,
@@ -419,9 +442,10 @@ class GNNDomainAdaptationTrainApp:
 
 
 class GNNAutoEncoderTrainApp:
-    def __init__(self, train_dset, test_dset, label_type):
-        self.train_dset = train_dset
-        self.test_dset = test_dset
+    def __init__(self, eeg_dset, eye_dset, split_strategy, label_type):
+        self.eeg_dset = eeg_dset
+        self.eye_dset = eye_dset
+        self.split_strategy = split_strategy
         self.label_type = label_type
         self.nworkers = os.cpu_count()
         self.maxepochs = args.maxepochs
@@ -430,11 +454,14 @@ class GNNAutoEncoderTrainApp:
         self.device = torch.device('cuda' if self.use_cuda else 'cpu')
     
     def get_runs(self):
-        params = OrderedDict(lr = eval(args.lr),
+        params = OrderedDict(lr_fe = eval(args.lr_fe),
+                             lr_lc = eval(args.lr_lc),
                              num_hidden = eval(args.num_hidden),
                              K = eval(args.K),
                              dropout = eval(args.dropout),
-                             epsilon = eval(args.epsilon))
+                             epsilon = eval(args.epsilon),
+                             reclosse = eval(args.reclosse),
+                             lablosse = eval(args.lablosse))
         
         Run = namedtuple('Run', params.keys())
         runs = []
@@ -455,20 +482,23 @@ class GNNAutoEncoderTrainApp:
         sgc = SGCFeatureExtractor(num_nodes=62,
                                   learn_edge_weight=True,
                                   edge_weight=edge_weight,
-                                  num_features=self.train_dset.num_node_features,
+                                  num_features=self.eeg_dset.num_node_features,
                                   num_hidden=num_hidden,
                                   K=K)
-        label_classifier = LabelClassifier(62*self.train_dset.num_node_features, dropout)
+        input_dim = 62 * self.eeg_dset.num_node_features + 115
+        autoencoder = AutoEncoder(input_dim, dropout)
+        lc = LabelClassifier(input_dim//4, dropout)
         
         if self.use_cuda:
             logger.info('Using cuda. Total {:d} devices.'.format(torch.cuda.device_count()))
             if torch.cuda.device_count() > 1:
                 sgc = DataParallel(sgc)
-                label_classifier = nn.DataParallel(label_classifier)
+                autoencoder = nn.DataParallel(autoencoder)
+                lc = nn.DataParallel(lc)
         else:
             logger.info('Using cpu.')
 
-        return sgc.to(self.device), label_classifier.to(self.device)
+        return sgc.to(self.device), autoencoder.to(self.device), lc.to(self.device)
 
     def getSoftLabel(self, y, epsilon):
         """[summary]
@@ -494,19 +524,25 @@ class GNNAutoEncoderTrainApp:
         
         return torch.tensor(soft_y, dtype=torch.float, device=self.device)
 
-    def test(self, sgc, label_classifier, dloader):
+    def test(self, sgc, autoencoder, lc, dloader):
         sgc.eval()
-        label_classifier.eval()
+        autoencoder.eval()
+        lc.eval()
         with torch.no_grad():
             y_true, y_pred = [], []
-            for graph_list in dloader:
-                # (batch_size, num_hidden)
+            for graph_list, (eye_data, eye_label) in dloader:
+                # (batch_size, 62*num_node_features)
                 sgc_output = sgc(graph_list)
+                # concate
+                eye_data = eye_data.to(self.device)
+                concatenated_feature = torch.cat((sgc_output, eye_data), dim=1).to(self.device)
+
+                codes, _ = autoencoder(concatenated_feature)
                 # (batch_size, 3)
-                labcl_output = label_classifier(sgc_output)
+                labcl_output = lc(codes)
                 
                 y_pred.append(torch.argmax(labcl_output, dim=1).detach().cpu().numpy())
-                y = torch.cat([data.y for data in graph_list]).to(labcl_output.device)
+                y = torch.cat([data.y for data in graph_list])
                 y_true.append(y.detach().cpu().numpy())
             
             y_true = np.concatenate(y_true, axis=0)
@@ -525,81 +561,120 @@ class GNNAutoEncoderTrainApp:
                 result[run][ph] = {}
 
         for run in runs:
-            comment = ' GNNCrossSubj lr={} num_hidden={} K={} dropout={} epsilon={}'.format(run.lr, run.num_hidden, run.K, run.dropout, run.epsilon)
+            comment = ' GNNAutoEncoder lr_fe={} lr_lc={} num_hidden={} K={} dropout={} epsilon={} reclosse={}'.format(run.lr_fe, run.lr_lc, run.num_hidden, run.K, run.dropout, run.epsilon, run.reclosse)
             
             # dann_writer = SummaryWriter(comment=comment)
 
-            logger.info('====== Hyper Parameter test: ' + comment)
+            logger.info('====== Hyper Parameter test:' + comment)
             start_outer = time.time()
 
-            train_dloader = DataListLoader(self.train_dset, batch_size=128, shuffle=True, drop_last=True)
-            test_dloader = DataListLoader(self.test_dset, batch_size=128, shuffle=True, drop_last=False)
+            cross_validation_results = {}
+            for ph in phases:
+                cross_validation_results[ph] = {}
+                for ind in indicators:
+                    cross_validation_results[ph][ind] = []
 
-            sgc, label_classifier = self.getModel(run.num_hidden, run.K, run.dropout)
+            for train_idx, test_idx in self.split_strategy.split(self.eeg_dset, self.eeg_dset.data.y):
+                train_eeg_dset = self.eeg_dset[train_idx]
+                train_eeg_dset = train_eeg_dset.copy()
+                test_eeg_dset = self.eeg_dset[test_idx]
+                test_eeg_dset = test_eeg_dset.copy()
 
-            optim = torch.optim.Adam(list(sgc.parameters())+list(label_classifier.parameters()), lr=run.lr, weight_decay=args.weight_decay)
+                train_eye_dset = Subset(eye_dset, train_idx)
+                test_eye_dset = Subset(eye_dset, test_idx)
 
-            sgc.train()
-            label_classifier.train()
-            for epoch in tqdm(range(1, self.maxepochs+1)):
-                loss = 0
-                label_pred_accuracy = 0
+                train_eeg_dloader = DataListLoader(train_eeg_dset, batch_size=128, shuffle=False, drop_last=False)
+                train_eye_dloader = DataLoader(train_eye_dset, batch_size=128, shuffle=False, drop_last=False)
+                assert len(train_eeg_dloader) == len(train_eye_dloader)
 
-                n_batches = len(train_dloader)
-                for train_graph_list in tqdm(train_dloader, leave=False, total=n_batches):
-                    # (batch_size, num_hidden)
-                    train_sgc_output = sgc(train_graph_list)
-                    # (batch_size, 3)
-                    train_labcl_output = label_classifier(train_sgc_output)
+                test_eeg_dloader = DataListLoader(test_eeg_dset, batch_size=128, shuffle=False, drop_last=False)
+                test_eye_dloader = DataLoader(test_eye_dset, batch_size=128, shuffle=False, drop_last=False)
+                assert len(test_eeg_dloader) == len(test_eye_dloader)
 
-                    y = torch.cat([data.y for data in train_graph_list]).to(train_labcl_output.device)
-                    if self.label_type == 'hard':
-                        loss_b = F.nll_loss(train_labcl_output, y)
-                    elif self.label_type == 'soft':
-                        soft_y = self.getSoftLabel(y, run.epsilon)
-                        loss_b = F.kl_div(train_labcl_output, soft_y, reduction='batchmean')
-                    
-                    loss += loss_b
+                sgc, autoencoder, lc = self.getModel(run.num_hidden, run.K, run.dropout)
+                
+                optim = torch.optim.Adam(
+                    [{'params': list(sgc.parameters())+list(autoencoder.parameters()), 'lr': run.lr_fe},
+                    {'params': lc.parameters(), 'lr': run.lr_lc}],
+                    weight_decay=args.weight_decay)
 
-                    optim.zero_grad()
-                    loss_b.backward()
-                    optim.step()
+                sgc.train()
+                autoencoder.train()
+                lc.train()
+                for epoch in tqdm(range(1, self.maxepochs+1)):
+                    loss, reconstruct_loss, label_pred_loss = 0, 0, 0
+                    label_pred_accuracy = 0
 
-                    label_pred_accuracy += (train_labcl_output.max(dim=1)[1] == y).float().mean().item()
+                    n_batches = len(train_eeg_dloader)
+                    for train_graph_list, (train_eye_data, train_eye_label) in tqdm(zip(train_eeg_dloader, train_eye_dloader), leave=False, total=n_batches):
+                        # (batch_size, 62*num_node_features)
+                        train_sgc_output = sgc(train_graph_list)
+                        # concate
+                        train_eye_data = train_eye_data.to(self.device)
+                        concatenated_feature = torch.cat((train_sgc_output, train_eye_data), dim=1).to(self.device)
 
-                epa_mean = label_pred_accuracy / n_batches  # expected to increase
+                        codes, decoded = autoencoder(concatenated_feature)
+                        # (batch_size, 3)
+                        train_labcl_output = lc(codes)
 
-                # dann_writer.add_scalar('loss/total_loss', loss, epoch)
-                # dann_writer.add_scalar('accuracy/label_pred_accuracy', epa_mean, epoch)
-                # dann_writer.flush()
-                # dann_writer.close()
+                        y = torch.cat([data.y for data in train_graph_list]).to(train_labcl_output.device)
+                        if self.label_type == 'hard':
+                            label_pred_loss_b = F.nll_loss(train_labcl_output, y)
+                        elif self.label_type == 'soft':
+                            soft_y = self.getSoftLabel(y, run.epsilon)
+                            label_pred_loss_b = F.kl_div(train_labcl_output, soft_y, reduction='batchmean')
+                        label_pred_loss += label_pred_loss_b
 
-                if epoch == 1 or epoch % 10 == 0:
-                    logger.debug('Epoch {:6d}: train_label_pred_accuracy {:.4f}, loss {:.4f}'.format(epoch, epa_mean, loss))
-                    tqdm.write('Epoch {:6d}: train_label_pred_accuracy {:.4f}, loss {:.4f}'.format(epoch, epa_mean, loss))
-                if epoch % 50 == 0:
-                    test_acc, test_f1 = self.test(sgc, label_classifier, test_dloader)
-                    logger.debug('====== Test: test_label_pred_accuracy {:.4f}, test_f1 {:.4f}'.format(test_acc, test_f1))
-                    tqdm.write('====== Test: test_label_pred_accuracy {:.4f}, test_f1 {:.4f}'.format(test_acc, test_f1))
-                    if test_f1 > 0.6:
-                        break
-            
+                        reconstruct_loss_b = F.mse_loss(decoded, concatenated_feature)
+                        reconstruct_loss += reconstruct_loss_b
+
+                        loss_b = run.lablosse * label_pred_loss_b + run.reclosse * reconstruct_loss_b
+                        loss += loss_b
+
+                        optim.zero_grad()
+                        loss_b.backward()
+                        optim.step()
+
+                        label_pred_accuracy += (train_labcl_output.max(dim=1)[1] == y).float().mean().item()
+
+                    epa_mean = label_pred_accuracy / n_batches  # expected to increase
+
+                    # dann_writer.add_scalar('loss/total_loss', loss, epoch)
+                    # dann_writer.add_scalar('accuracy/label_pred_accuracy', epa_mean, epoch)
+                    # dann_writer.flush()
+                    # dann_writer.close()
+
+                    if epoch == 1 or epoch % 5 == 0:
+                        logger.debug('Epoch {:6d}: train_label_pred_accuracy {:.4f}, loss {:.4f}, reconstruct_loss {:.4f}, label_pred_loss {:.4f}'.format(epoch, epa_mean, loss, reconstruct_loss, label_pred_loss))
+                        tqdm.write('Epoch {:6d}: train_label_pred_accuracy {:.4f}, loss {:.4f}, reconstruct_loss {:.4f}, label_pred_loss {:.4f}'.format(epoch, epa_mean, loss, reconstruct_loss, label_pred_loss))
+                    if epoch % 20 == 0:
+                        # the iterator returned by zip() can not use twice
+                        test_acc, test_f1 = self.test(sgc, autoencoder, lc, zip(test_eeg_dloader, test_eye_dloader))
+                        logger.debug('====== Test: test_label_pred_accuracy {:.4f}, test_f1 {:.4f}'.format(test_acc, test_f1))
+                        tqdm.write('====== Test: test_label_pred_accuracy {:.4f}, test_f1 {:.4f}'.format(test_acc, test_f1))
+                        if test_f1 > 0.9:
+                            break
+                
+                validation_dloaders = [zip(train_eeg_dloader, train_eye_dloader), zip(test_eeg_dloader, test_eye_dloader)]
+                for ph, der in zip(phases, validation_dloaders):
+                    acc, f1 = self.test(sgc, autoencoder, lc, der)
+                    cross_validation_results[ph]['accuracy'].append(acc)
+                    cross_validation_results[ph]['f1_macro'].append(f1)
+
             end_outer = time.time()
             dur_outer = end_outer - start_outer
             logger.info('For this run, train time: {:4d}min {:2d}sec'.format(int(dur_outer // 60), int(dur_outer % 60)))
             
-            validation_dloaders = [train_dloader, test_dloader]
-            for ph, der in zip(phases, validation_dloaders):
-                acc, f1 = self.test(sgc, label_classifier, der)
-                result[run][ph]['accuracy'] = acc
-                result[run][ph]['f1_macro'] = f1
+            for ph in phases:
+                for ind in indicators:
+                    result[run][ph][ind] = np.array(cross_validation_results[ph][ind]).mean()
         
         best_run = runs[0]
         for run in runs:
             if(result[run]['test']['f1_macro'] > result[best_run]['test']['f1_macro']):
                 best_run = run
         
-        logger.info('====== Best hyper parameter: lr={} num_hidden={} K={} dropout={} epsilon={}'.format(best_run.lr, best_run.num_hidden, best_run.K, best_run.dropout, best_run.epsilon))
+        logger.info('====== Best hyper parameter: lr_fe={} lr_lc={} num_hidden={} K={} dropout={} epsilon={} reclosse={}'.format(best_run.lr_fe, best_run.lr_lc, best_run.num_hidden, best_run.K, best_run.dropout, best_run.epsilon, best_run.reclosse))
         return result[best_run]
 
 
@@ -1270,8 +1345,8 @@ if __name__ == '__main__':
                 if args.which == 0:
                     model_name = 'SVM'
                     logger.info('>>> Model: SVM')
-                    dset = ArtDataset(args.slice_length, feature, freq, [subject], exclude_imgs, oversample=True)
-                    split_strategy = StratifiedShuffleSplit(n_splits=6, test_size=1/6)
+                    dset = EEGEyeDataset(args.slice_length, feature, freq, [subject])
+                    split_strategy = StratifiedKFold(n_splits=5)
                     result = SVMTrainApp(dset, split_strategy).main()
                 elif args.which == 1:
                     model_name = 'GNN'
@@ -1279,9 +1354,10 @@ if __name__ == '__main__':
                     graph_data_dir = graph_data_root_dir + 'subjdep_{}s_{}_{}_{}_{}'.format(args.slice_length, feature, freq, subject, f"{datetime.datetime.now():%Y-%m-%d-%H-%M}")
                     if not os.path.exists(graph_data_dir):
                         os.makedirs(graph_data_dir)
-                    dset = ArtGraphDataset(args.slice_length, feature, freq, [subject], exclude_imgs, graph_data_dir, oversample=True)
-                    split_strategy = StratifiedShuffleSplit(n_splits=6, test_size=1/6)
-                    result = GNNTrainApp(dset, split_strategy, args.label_type).main()
+                    eeg_dset = EEGEyeArtGraphDataset(args.slice_length, feature, freq, [subject], graph_data_dir)
+                    eye_dset = EEGEyeArtDataset(args.slice_length, feature, freq, [subject])
+                    split_strategy = StratifiedKFold(n_splits=5)
+                    result = GNNAutoEncoderTrainApp(eeg_dset, eye_dset, split_strategy, args.label_type).main()
                 
                 exp_result[subject] = result
         elif args.exp == 'subj_indep':
@@ -1311,9 +1387,14 @@ if __name__ == '__main__':
                         os.makedirs(train_graph_data_dir)
                     if not os.path.exists(test_graph_data_dir):
                         os.makedirs(test_graph_data_dir)
-                    train_dset = ArtGraphDataset(args.slice_length, feature, freq, train_subjects, exclude_imgs, train_graph_data_dir, oversample=True)
-                    test_dset = ArtGraphDataset(args.slice_length, feature, freq, test_subjects, exclude_imgs, test_graph_data_dir)
-                    result = GNNCrossSubjTrainApp(train_dset, test_dset, args.label_type).main()
+                    # train_dset = ArtGraphDataset(args.slice_length, feature, freq, train_subjects, exclude_imgs, train_graph_data_dir, oversample=True)
+                    # test_dset = ArtGraphDataset(args.slice_length, feature, freq, test_subjects, exclude_imgs, test_graph_data_dir)
+                    # result = GNNCrossSubjTrainApp(train_dset, test_dset, args.label_type).main()
+                    train_eeg_dset = EEGEyeArtGraphDataset(args.slice_length, feature, freq, train_subjects, train_graph_data_dir)
+                    train_eye_dset = EEGEyeArtDataset(args.slice_length, feature, freq, train_subjects)
+                    test_eeg_dset = EEGEyeArtGraphDataset(args.slice_length, feature, freq, test_subjects, test_graph_data_dir)
+                    test_eye_dset = EEGEyeArtDataset(args.slice_length, feature, freq, test_subjects)
+                    result = GNNAutoEncoderTrainApp(train_eeg_dset, train_eye_dset, test_eeg_dset, test_eye_dset, args.label_type).main()
                 
                 exp_result[subject] = result
 
