@@ -13,8 +13,8 @@ freq_bands = ['delta', 'theta', 'alpha', 'beta', 'gamma']
 data_path_temp = r'/mnt/xlancefs/home/gwl20/code/data/features/{}s/{}_data_{}_{}s.npy'
 label_path_temp = r'/mnt/xlancefs/home/gwl20/code/data/features/{}s/{}_label_{}s.npy'
 
-eegeye_data_temp = r'/mnt/xlancefs/home/gwl20/code/data/eegeye/{}_data_{}_de_{}s.npy'
-eegeye_label_temp = r'/mnt/xlancefs/home/gwl20/code/data/eegeye/{}_label_{}_de_{}s.npy'
+eegeye_data_temp = r'/mnt/xlancefs/home/gwl20/code/data/eegeye_datanewsplit/{}_data_{}_de_{}s.npy'
+eegeye_label_temp = r'/mnt/xlancefs/home/gwl20/code/data/eegeye_datanewsplit/{}_label_{}_de_{}s.npy'
 
 img_order = np.load(r'/mnt/xlancefs/home/gwl20/code/data/img_order.npy', allow_pickle=True).item()
 

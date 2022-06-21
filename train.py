@@ -155,7 +155,7 @@ console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(log_formatter)
 
-file_handler = logging.FileHandler('./logs/eegeye_{}_{}_{}.log'.format(args.exp, args.which, args.slice_length), mode='w')
+file_handler = logging.FileHandler('./logs_newdatasplit/eegeye_{}_{}_{}.log'.format(args.exp, args.which, args.slice_length), mode='w')
 file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(log_formatter)
 
@@ -595,7 +595,7 @@ class GNNAutoEncoderTrainApp:
                 
                 optim = torch.optim.Adam(
                     [{'params': list(sgc.parameters())+list(autoencoder.parameters()), 'lr': run.lr_fe},
-                    {'params': lc.parameters(), 'lr': run.lr_lc}],
+                     {'params': lc.parameters(), 'lr': run.lr_lc}],
                     weight_decay=args.weight_decay)
 
                 sgc.train()
@@ -1346,7 +1346,19 @@ if __name__ == '__main__':
                     model_name = 'SVM'
                     logger.info('>>> Model: SVM')
                     dset = EEGEyeDataset(args.slice_length, feature, freq, [subject])
-                    split_strategy = StratifiedKFold(n_splits=5)
+                    nncases = dset.data.size(dim=0)
+                    nncases_per_class = int(nncases / 3)
+                    nnpics_per_class = int(nncases_per_class / 6)
+                    nnpics_per_validation = int(nnpics_per_class / 6)
+                    nnpics_arr = [nnpics_per_validation] * 5 + [nnpics_per_class-nnpics_per_validation*5]
+                    # (nncases, )
+                    test_fold = []
+                    for class_idx in range(3):
+                        for val_idx, nnpics_a in enumerate(nnpics_arr):
+                            test_fold += [val_idx] * nnpics_a * 6
+
+                    # split_strategy = StratifiedKFold(n_splits=5)
+                    split_strategy = PredefinedSplit(test_fold=test_fold)
                     result = SVMTrainApp(dset, split_strategy).main()
                 elif args.which == 1:
                     model_name = 'GNN'
@@ -1356,7 +1368,21 @@ if __name__ == '__main__':
                         os.makedirs(graph_data_dir)
                     eeg_dset = EEGEyeArtGraphDataset(args.slice_length, feature, freq, [subject], graph_data_dir)
                     eye_dset = EEGEyeArtDataset(args.slice_length, feature, freq, [subject])
-                    split_strategy = StratifiedKFold(n_splits=5)
+
+                    nncases = eye_dset.data.size(dim=0)
+                    nncases_per_class = int(nncases / 3)
+                    nnpics_per_class = int(nncases_per_class / 6)
+                    nnpics_per_validation = int(nnpics_per_class / 6)
+                    nnpics_arr = [nnpics_per_validation] * 5 + [nnpics_per_class-nnpics_per_validation*5]
+                    # (nncases, )
+                    test_fold = []
+                    for class_idx in range(3):
+                        for val_idx, nnpics_a in enumerate(nnpics_arr):
+                            test_fold += [val_idx] * nnpics_a * 6
+
+                    # split_strategy = StratifiedKFold(n_splits=5)
+                    split_strategy = PredefinedSplit(test_fold=test_fold)
+
                     result = GNNAutoEncoderTrainApp(eeg_dset, eye_dset, split_strategy, args.label_type).main()
                 
                 exp_result[subject] = result
@@ -1427,7 +1453,7 @@ if __name__ == '__main__':
         ax.bar_label(acc_test_rect, padding=3)
         ax.bar_label(f1_train_rect, padding=3)
         ax.bar_label(f1_test_rect, padding=3)
-        fig.savefig('./figs20211202/{}_{}_{}s_{}_{}.png'.format(args.exp, feature, args.slice_length, freq, model_name))
+        fig.savefig('./figs20220621/{}_{}_{}s_{}_{}.png'.format(args.exp, feature, args.slice_length, freq, model_name))
         plt.close('all')
 
         logger.info('====Train:\nacc: {:.4f}/{:.4f}\nf1: {:.4f}/{:.4f}'.format(subj_train_accs.mean(), subj_train_accs.std(), subj_train_f1s.mean(), subj_train_f1s.std()))
